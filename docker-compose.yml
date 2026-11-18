@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: saas-erp-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@host.docker.internal:5432/saas_erp_mvp}
+      - GEMINI_CHAT_MODEL=${GEMINI_CHAT_MODEL:-gemini-1.5-flash}
+      - GEMINI_PRO_MODEL=${GEMINI_PRO_MODEL:-gemini-1.5-pro}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
+      - META_API_VERSION=${META_API_VERSION:-v18.0}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
