@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: saas-erp-backend
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_CHAT_MODEL
+        value: gemini-1.5-flash
+      - key: GEMINI_PRO_MODEL
+        value: gemini-1.5-pro
+      - key: GEMINI_EMBEDDING_MODEL
+        value: text-embedding-004
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_API_VERSION
+        value: v18.0
+      - key: SEPAY_API_KEY
+        sync: false
+      - key: SEPAY_ACCOUNT_NUMBER
+        sync: false
+      - key: SEPAY_BANK_CODE
+        value: MB
+      - key: SEPAY_WEBHOOK_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: CORS_ORIGINS
+        value: '["*"]'
