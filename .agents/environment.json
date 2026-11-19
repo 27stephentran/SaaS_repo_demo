@@ -1,0 +1,3 @@
+{
+  "install": "([ ! -f .env.example ] || [ -f .env ] || cp .env.example .env) && ([ ! -f backend/requirements.txt ] || (([ -x backend/.venv/bin/python ] || python3 -m venv backend/.venv) && backend/.venv/bin/pip install --quiet --disable-pip-version-check -r backend/requirements.txt)) && ([ ! -f frontend/package.json ] || npm --prefix frontend install --no-audit --no-fund)"
+}
