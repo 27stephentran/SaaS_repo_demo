@@ -1,0 +1,3 @@
+{
+  "install": "bash scripts/install_platform_clis.sh"
+}
