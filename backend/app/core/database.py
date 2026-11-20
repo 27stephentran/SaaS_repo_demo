@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import sys
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.models.entities import (
@@ -40,13 +42,29 @@ DEFAULT_LOCAL_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5
 
 settings = get_settings()
 
+_use_null_pool = (
+    os.getenv("USE_POSTGRES_IN_TESTS", "").strip().lower() in ("1", "true")
+    or bool(os.getenv("PYTEST_CURRENT_TEST"))
+    or "pytest" in sys.modules
+)
+
 # SQLAlchemy 2.0 AsyncEngine configured for Supabase PostgreSQL + Supavisor pooling
-engine: AsyncEngine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    pool_pre_ping=True,
-    future=True,
-    connect_args={"statement_cache_size": 0},
+engine: AsyncEngine = (
+    create_async_engine(
+        settings.database_url,
+        echo=False,
+        poolclass=NullPool,
+        future=True,
+        connect_args={"statement_cache_size": 0},
+    )
+    if _use_null_pool
+    else create_async_engine(
+        settings.database_url,
+        echo=False,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"statement_cache_size": 0},
+    )
 )
 
 AsyncSessionLocal = async_sessionmaker(

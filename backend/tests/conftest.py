@@ -36,6 +36,7 @@ from app.core.auth import create_access_token, hash_password, hash_token  # noqa
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import (  # noqa: E402
     AsyncSessionLocal,
+    engine,
     erp_repository,
     tenant_db_session,
 )
@@ -212,11 +213,17 @@ def isolate_test_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture(autouse=True)
 async def isolate_postgres_test_state() -> AsyncIterator[None]:
     """When `USE_POSTGRES_IN_TESTS=1`, reset and re-seed PostgreSQL tables around each test."""
-    if _use_postgres_in_tests():
-        await reset_postgres_test_state()
-    yield
-    if _use_postgres_in_tests():
-        await reset_postgres_test_state()
+    try:
+        if _use_postgres_in_tests():
+            await engine.dispose()
+            await reset_postgres_test_state()
+        yield
+    finally:
+        if _use_postgres_in_tests():
+            try:
+                await reset_postgres_test_state()
+            finally:
+                await engine.dispose()
 
 
 @pytest.fixture
