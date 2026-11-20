@@ -1,4 +1,36 @@
+# Production-parity bootstrap notes (after `docker compose up -d postgres`):
+# 1. Pre-initialized DB (`01_init_schema.sql`) -> sync Alembic revision state:
+#      docker compose exec backend alembic stamp head
+# 2. Production-parity RLS testing with a non-owner NOBYPASSRLS role (see `backend/sql/init_schema.sql` §16):
+#      docker compose exec -T postgres psql -U postgres -d saas_erp_mvp -c \
+#        "CREATE ROLE app_runtime NOINHERIT LOGIN PASSWORD 'app_runtime_dev' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; \
+#         GRANT USAGE ON SCHEMA public TO app_runtime; \
+#         GRANT SELECT, INSERT, UPDATE, DELETE ON inventory, customers, employees, orders, sepay_webhook_logs, users, api_tokens, webhook_dedup_events, outbox_jobs TO app_runtime; \
+#         GRANT USAGE, SELECT ON SEQUENCE order_code_seq, sepay_webhook_logs_id_seq, webhook_dedup_events_id_seq TO app_runtime; \
+#         REVOKE ALL ON tenant_channels FROM PUBLIC; \
+#         GRANT EXECUTE ON FUNCTION match_inventory_embeddings(vector, varchar, integer), resolve_tenant_by_channel(text, text, text) TO app_runtime;"
+#    Then run `backend` with `DATABASE_URL=postgresql+asyncpg://app_runtime:app_runtime_dev@postgres:5432/saas_erp_mvp`.
 services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: saas-erp-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-saas_erp_mvp}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/sql/init_schema.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-saas_erp_mvp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   backend:
     build:
       context: ./backend
@@ -10,14 +42,39 @@ services:
       - path: ./.env
         required: false
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@host.docker.internal:5432/saas_erp_mvp}
+      - APP_ENV=${APP_ENV:-development}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/saas_erp_mvp}
+      - API_TOKEN_SECRET=${API_TOKEN_SECRET:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}
       - GEMINI_CHAT_MODEL=${GEMINI_CHAT_MODEL:-gemini-1.5-flash}
       - GEMINI_PRO_MODEL=${GEMINI_PRO_MODEL:-gemini-1.5-pro}
       - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
       - META_API_VERSION=${META_API_VERSION:-v18.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: saas-erp-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NUXT_API_BASE_URL=http://backend:8000
+      - NUXT_PUBLIC_API_BASE_URL=${NUXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

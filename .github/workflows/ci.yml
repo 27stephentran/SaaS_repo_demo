@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  backend:
+    name: Backend (Lint, Typecheck, Pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: saas_erp_mvp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d saas_erp_mvp"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "backend/requirements*.txt"
+
+      - name: Install backend dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run Ruff lint
+        run: ruff check app/ tests/
+
+      - name: Run Pyright typecheck
+        run: pyright
+
+      - name: Run Alembic migrations & verify schema
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/saas_erp_mvp
+        run: |
+          alembic upgrade head
+          python - <<'EOF'
+          import asyncio
+          import os
+          import asyncpg
+
+
+          async def verify() -> None:
+              dsn = os.environ["DATABASE_URL"].replace("+asyncpg", "")
+              conn = await asyncpg.connect(dsn)
+              try:
+                  users_table = await conn.fetchval("SELECT to_regclass('public.users')")
+                  assert users_table is not None, "users table missing after migration"
+                  hnsw_index = await conn.fetchval(
+                      "SELECT indexdef FROM pg_indexes "
+                      "WHERE tablename = 'inventory' AND indexname = 'idx_inventory_embedding_hnsw'"
+                  )
+                  assert hnsw_index and "hnsw" in hnsw_index.lower(), (
+                      f"inventory HNSW index missing: {hnsw_index}"
+                  )
+                  resolve_fn = await conn.fetchval(
+                      "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname = 'resolve_tenant_by_channel')"
+                  )
+                  assert resolve_fn, "resolve_tenant_by_channel function missing after migration"
+                  print("Schema sanity check passed:", users_table, hnsw_index)
+              finally:
+                  await conn.close()
+
+
+          asyncio.run(verify())
+          EOF
+
+      - name: Run Pytest suite
+        run: pytest -v
+
+      - name: Run Postgres-active health smoke test
+        env:
+          USE_POSTGRES_IN_TESTS: "1"
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/saas_erp_mvp
+        run: pytest -v tests/test_phase3.py -k "health"
+
+  frontend:
+    name: Frontend (Typecheck, Build, Test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run Nuxt typecheck
+        run: npm run typecheck
+
+      - name: Run Nuxt production build
+        run: npm run build
+
+      - name: Run Vitest suite
+        run: npm test

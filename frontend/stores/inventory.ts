@@ -2,8 +2,6 @@ import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import { useErpStore } from '~/stores/erp'
 
-export { useErpStore }
-
 export const useInventoryStore = defineStore('inventory', () => {
   const erpStore = useErpStore()
 

@@ -8,7 +8,11 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: APP_ENV
+        value: production
       - key: DATABASE_URL
+        sync: false
+      - key: API_TOKEN_SECRET
         sync: false
       - key: GEMINI_API_KEY
         sync: false
@@ -22,6 +26,8 @@ services:
         sync: false
       - key: META_ACCESS_TOKEN
         sync: false
+      - key: META_APP_SECRET
+        sync: false
       - key: META_API_VERSION
         value: v18.0
       - key: SEPAY_API_KEY
@@ -32,7 +38,17 @@ services:
         value: MB
       - key: SEPAY_WEBHOOK_SECRET
         sync: false
+      - key: SEPAY_AUTH_MODE
+        value: hmac # Set to "both" if legacy Apikey webhook auth is required
+      - key: SEPAY_PAYMENT_PREFIX
+        value: DH
+      - key: SEPAY_MEMO_PREFIX
+        value: "SEVQR" # Set to "" if bank transfer memo prefix is unused
+      - key: SEPAY_STRICT_ACCOUNT_CHECK
+        value: "true"
+      - key: SEPAY_QR_TEMPLATE
+        value: compact
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: CORS_ORIGINS
-        value: '["*"]'
+        value: '["https://saa-s-repo-demo.vercel.app","https://saas-repo-demo.onrender.com"]'

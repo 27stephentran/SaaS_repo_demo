@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import time
+from collections.abc import Callable
+from typing import Any
+
 import httpx
 import pytest
 
 from app.core.database import PGVECTOR_SIMILARITY_SQL, erp_repository
 from app.main import app
+from app.models.entities import OrderCreateRequest, OrderLineItemRequest, OrderStatus
 from app.services.ai_rag import sales_rag_engine, sanitize_untrusted_input
+from app.services.integrations import meta_graph_client, sepay_client, telegram_dispatch_client
 
 
 @pytest.mark.asyncio
@@ -25,9 +34,14 @@ async def test_health_check() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inventory_crud_and_pgvector_search_post_and_get() -> None:
+async def test_inventory_crud_and_pgvector_search_post_and_get(
+    auth_headers: dict[str, str],
+) -> None:
     """Verify inventory CRUD, 768-dim embedding, and both POST and GET `/inventory/search` with similarity_score."""
-    assert "<->" in str(PGVECTOR_SIMILARITY_SQL)
+    sql_text = str(PGVECTOR_SIMILARITY_SQL)
+    assert "<=>" in sql_text
+    assert "similarity_score" in sql_text
+    assert "<->" not in sql_text
 
     vec = await sales_rag_engine.embed_text("Specialty Arabica coffee from Da Lat")
     assert len(vec) == 768
@@ -35,7 +49,7 @@ async def test_inventory_crud_and_pgvector_search_post_and_get() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. List initial seeded inventory
-        list_resp = await client.get("/api/v1/erp/inventory")
+        list_resp = await client.get("/api/v1/erp/inventory", headers=auth_headers)
         assert list_resp.status_code == 200
         items = list_resp.json()
         assert len(items) >= 3
@@ -50,7 +64,11 @@ async def test_inventory_crud_and_pgvector_search_post_and_get() -> None:
             "price_vnd": 450000,
             "stock_quantity": 20,
         }
-        create_resp = await client.post("/api/v1/erp/inventory", json=create_payload)
+        create_resp = await client.post(
+            "/api/v1/erp/inventory",
+            json=create_payload,
+            headers=auth_headers,
+        )
         assert create_resp.status_code == 201
         created = create_resp.json()
         assert created["sku"] == "MATCHA-UJI-100G"
@@ -61,6 +79,7 @@ async def test_inventory_crud_and_pgvector_search_post_and_get() -> None:
         search_post_resp = await client.post(
             "/api/v1/erp/inventory/search",
             json={"query": "Japanese ceremonial green tea matcha", "limit": 3},
+            headers=auth_headers,
         )
         assert search_post_resp.status_code == 200
         post_matches = search_post_resp.json()
@@ -75,6 +94,7 @@ async def test_inventory_crud_and_pgvector_search_post_and_get() -> None:
         search_get_resp = await client.get(
             "/api/v1/erp/inventory/search",
             params={"q": "Japanese ceremonial green tea matcha", "limit": 3},
+            headers=auth_headers,
         )
         assert search_get_resp.status_code == 200
         get_matches = search_get_resp.json()
@@ -124,8 +144,13 @@ async def test_ai_rag_prompt_injection_defense_and_model_routing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_meta_webhook_verification_and_rag_order_flow() -> None:
-    """Verify Meta Graph v18.0 webhook challenge and inbound customer message -> RAG + VietQR order."""
+async def test_meta_webhook_verification_and_rag_order_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    meta_signature_headers: Callable[[bytes, str | None], dict[str, str]],
+) -> None:
+    """Verify Meta Graph v18.0 webhook challenge and signed inbound message -> RAG + VietQR order."""
+    monkeypatch.setattr(meta_graph_client, "app_secret", "test-meta-app-secret-0123456789")
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         # 1. Valid verification challenge
@@ -151,7 +176,7 @@ async def test_meta_webhook_verification_and_rag_order_flow() -> None:
         )
         assert bad_resp.status_code == 403
 
-        # 3. Inbound customer message with purchase intent ("mua")
+        # 3. Signed inbound customer message with purchase intent ("mua")
         webhook_payload = {
             "object": "page",
             "entry": [
@@ -170,7 +195,12 @@ async def test_meta_webhook_verification_and_rag_order_flow() -> None:
                 }
             ],
         }
-        post_resp = await client.post("/api/v1/webhooks/meta", json=webhook_payload)
+        raw_body = json.dumps(webhook_payload, separators=(",", ":")).encode("utf-8")
+        post_resp = await client.post(
+            "/api/v1/webhooks/meta",
+            content=raw_body,
+            headers=meta_signature_headers(raw_body, None),
+        )
         assert post_resp.status_code == 200
         result = post_resp.json()
         assert result["status"] == "EVENT_RECEIVED"
@@ -240,22 +270,24 @@ async def test_sepay_ipn_webhook_fail_closed_and_idempotency() -> None:
 
 
 @pytest.mark.asyncio
-async def test_erp_orders_customers_employees_endpoints_and_frontend_contract() -> None:
-    """Verify ERP orders creation, frontend 1:1 fields, Kanban status update, customers, and employees."""
+async def test_erp_orders_customers_employees_endpoints_and_frontend_contract(
+    auth_headers: dict[str, str],
+) -> None:
+    """Verify authenticated ERP orders creation, catalog pricing, valid transitions, customers, and employees."""
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        cust_resp = await client.get("/api/v1/erp/customers")
+        cust_resp = await client.get("/api/v1/erp/customers", headers=auth_headers)
         assert cust_resp.status_code == 200
         customers = cust_resp.json()
         assert len(customers) >= 1
 
-        emp_resp = await client.get("/api/v1/erp/employees")
+        emp_resp = await client.get("/api/v1/erp/employees", headers=auth_headers)
         assert emp_resp.status_code == 200
         employees = emp_resp.json()
         assert len(employees) >= 1
         assert employees[0]["telegram_user_id"] == "8499887766"
 
-        # Create order via ERP API and verify 1:1 frontend schema fields
+        # Create order via ERP API and verify authoritative catalog pricing + 1:1 frontend fields
         new_order_resp = await client.post(
             "/api/v1/erp/orders",
             json={
@@ -264,12 +296,11 @@ async def test_erp_orders_customers_employees_endpoints_and_frontend_contract() 
                 "items": [
                     {
                         "sku": "EQUIP-V60-KIT",
-                        "name": "Ceramic V60 Pour-Over Brewer Kit",
                         "quantity": 1,
-                        "unit_price_vnd": 650000,
                     }
                 ],
             },
+            headers=auth_headers,
         )
         assert new_order_resp.status_code == 201
         created_order = new_order_resp.json()
@@ -279,13 +310,467 @@ async def test_erp_orders_customers_employees_endpoints_and_frontend_contract() 
         assert isinstance(created_order["items"], list)
         assert len(created_order["items"]) == 1
         assert created_order["items"][0]["sku"] == "EQUIP-V60-KIT"
+        assert created_order["items"][0]["unit_price_vnd"] == 650000
         assert created_order["vietqr_url"] == created_order["sepay_qr_url"]
         assert created_order["sepay_reference"] == created_order["order_code"]
 
-        # Update status to FULFILLING
-        patch_resp = await client.patch(
-            f"/api/v1/erp/orders/{created_order['id']}/status",
-            json={"status": "FULFILLING"},
+        # Valid order lifecycle transitions: PENDING_PAYMENT -> PAID -> FULFILLING -> COMPLETED
+        for next_status in ("PAID", "FULFILLING", "COMPLETED"):
+            patch_resp = await client.patch(
+                f"/api/v1/erp/orders/{created_order['id']}/status",
+                json={"status": next_status},
+                headers=auth_headers,
+            )
+            assert patch_resp.status_code == 200
+            assert patch_resp.json()["status"] == next_status
+
+
+@pytest.mark.asyncio
+async def test_sepay_webhook_hmac_guards_and_vietqr_rules() -> None:
+    """Verify SePay HMAC-SHA256 auth, replay window, transferType/underpayment guards, and VietQR URL."""
+    qr_url = sepay_client.generate_vietqr_url(amount_vnd=320000, order_code="DH2001")
+    assert "qr.sepay.vn/img" in qr_url
+    assert "des=DH2001" in qr_url
+    assert "template=compact" in qr_url
+
+    # Create a dedicated PENDING_PAYMENT order (DH9001, 500,000 VND)
+    customer = erp_repository.list_customers()[0]
+    pending_order = erp_repository.create_order(
+        payload=OrderCreateRequest(
+            customer_id=customer.id,
+            items=[
+                OrderLineItemRequest(
+                    sku="COFFEE-ROBUSTA-1KG",
+                    name="Fine Robusta Dak Lak Whole Bean 1kg",
+                    quantity=1,
+                    unit_price_vnd=500000,
+                )
+            ],
+        ),
+        sepay_qr_url=sepay_client.generate_vietqr_url(amount_vnd=500000, order_code="DH9001"),
+        order_code="DH9001",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Expired HMAC timestamp (> 300s) must fail closed with 401
+        stale_ts = str(int(time.time()) - 600)
+        underpaid_body = json.dumps(
+            {
+                "id": 880001,
+                "gateway": "Vietcombank",
+                "transactionDate": "2026-11-19 10:00:00",
+                "accountNumber": "0123456789",
+                "subAccount": None,
+                "code": None,
+                "content": "Khach chuyen thieu tien DH9001",
+                "transferType": "in",
+                "description": None,
+                "transferAmount": 100000,
+                "referenceCode": None,
+                "accumulated": 0,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        stale_sig = "sha256=" + hmac.new(
+            sepay_client.webhook_secret.encode("utf-8"),
+            f"{stale_ts}.".encode() + underpaid_body,
+            hashlib.sha256,
+        ).hexdigest()
+        stale_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=underpaid_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-SePay-Timestamp": stale_ts,
+                "X-SePay-Signature": stale_sig,
+            },
         )
-        assert patch_resp.status_code == 200
-        assert patch_resp.json()["status"] == "FULFILLING"
+        assert stale_resp.status_code == 401
+
+        # 2. Tampered HMAC signature must fail closed with 401
+        now_ts = str(int(time.time()))
+        bad_sig_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=underpaid_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-SePay-Timestamp": now_ts,
+                "X-SePay-Signature": "sha256=deadbeef",
+            },
+        )
+        assert bad_sig_resp.status_code == 401
+
+        # 3. Valid HMAC with underpayment returns 200 {"success": True} and keeps order PENDING_PAYMENT
+        valid_underpaid_sig = "sha256=" + hmac.new(
+            sepay_client.webhook_secret.encode("utf-8"),
+            f"{now_ts}.".encode() + underpaid_body,
+            hashlib.sha256,
+        ).hexdigest()
+        underpaid_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=underpaid_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-SePay-Timestamp": now_ts,
+                "X-SePay-Signature": valid_underpaid_sig,
+            },
+        )
+        assert underpaid_resp.status_code == 200
+        underpaid_data = underpaid_resp.json()
+        assert underpaid_data["success"] is True
+        assert underpaid_data["payment_verified"] is False
+        assert underpaid_data["reason"] == "underpayment"
+        assert erp_repository.get_order_by_code("DH9001").status == OrderStatus.PENDING_PAYMENT  # type: ignore[union-attr]
+
+        # 4. Outbound transfer ("out") mentioning DH9001 is ignored cleanly with 200 {"success": True}
+        outbound_body = json.dumps(
+            {
+                "id": 880002,
+                "gateway": "MBBank",
+                "transactionDate": "2026-11-19 10:05:00",
+                "accountNumber": "0123456789",
+                "code": "DH9001",
+                "content": "Hoan tien DH9001",
+                "transferType": "out",
+                "transferAmount": 500000,
+                "referenceCode": "FT263220002",
+            }
+        ).encode("utf-8")
+        outbound_sig = "sha256=" + hmac.new(
+            sepay_client.webhook_secret.encode("utf-8"),
+            f"{now_ts}.".encode() + outbound_body,
+            hashlib.sha256,
+        ).hexdigest()
+        outbound_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=outbound_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-SePay-Timestamp": now_ts,
+                "X-SePay-Signature": outbound_sig,
+            },
+        )
+        assert outbound_resp.status_code == 200
+        assert outbound_resp.json()["success"] is True
+        assert outbound_resp.json()["ignored"] is True
+        assert erp_repository.get_order_by_code("DH9001").status == OrderStatus.PENDING_PAYMENT  # type: ignore[union-attr]
+
+        # 5. Valid HMAC with full inbound payment transitions DH9001 -> PAID
+        paid_body = json.dumps(
+            {
+                "id": 880003,
+                "gateway": "Vietcombank",
+                "transactionDate": "2026-11-19 10:10:00",
+                "accountNumber": "0123456789",
+                "subAccount": "",
+                "code": "DH9001",
+                "content": "DH9001 chuyen tien",
+                "transferType": "in",
+                "description": "",
+                "transferAmount": 500000,
+                "accumulated": 0,
+                "referenceCode": "FT263220003",
+            }
+        ).encode("utf-8")
+        paid_sig = "sha256=" + hmac.new(
+            sepay_client.webhook_secret.encode("utf-8"),
+            f"{now_ts}.".encode() + paid_body,
+            hashlib.sha256,
+        ).hexdigest()
+        paid_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=paid_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-SePay-Timestamp": now_ts,
+                "X-SePay-Signature": paid_sig,
+            },
+        )
+        assert paid_resp.status_code == 200
+        paid_data = paid_resp.json()
+        assert paid_data["success"] is True
+        assert paid_data["order_code"] == pending_order.order_code
+        assert paid_data["order_status"] == "PAID"
+        assert paid_data["sepay_transaction_id"] == "880003"
+
+
+@pytest.mark.asyncio
+async def test_sepay_webhook_ignores_paid_and_cancelled_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify new tx IDs targeting PAID or CANCELLED orders return 200 ignored=True without overwrite or Telegram dispatch."""
+    telegram_calls: list[dict[str, Any]] = []
+
+    async def _spy_dispatch(**kwargs: Any) -> dict[str, Any]:
+        telegram_calls.append(kwargs)
+        return {"dispatched": True, "simulated": True}
+
+    monkeypatch.setattr(telegram_dispatch_client, "dispatch_order_alert", _spy_dispatch)
+
+    customer = erp_repository.list_customers()[0]
+    line_item = OrderLineItemRequest(
+        sku="COFFEE-ROBUSTA-1KG",
+        name="Fine Robusta Dak Lak Whole Bean 1kg",
+        quantity=1,
+        unit_price_vnd=500000,
+    )
+
+    paid_order = erp_repository.create_order(
+        payload=OrderCreateRequest(customer_id=customer.id, items=[line_item]),
+        sepay_qr_url=sepay_client.generate_vietqr_url(amount_vnd=500000, order_code="DH9002"),
+        order_code="DH9002",
+    )
+    erp_repository.mark_order_paid_by_code(order_code=paid_order.order_code, transaction_id="880100")
+
+    cancelled_order = erp_repository.create_order(
+        payload=OrderCreateRequest(customer_id=customer.id, items=[line_item]),
+        sepay_qr_url=sepay_client.generate_vietqr_url(amount_vnd=500000, order_code="DH9003"),
+        order_code="DH9003",
+    )
+    erp_repository.update_order_status(order_id=cancelled_order.id, new_status=OrderStatus.CANCELLED)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. New tx ID for already-PAID order -> 200 {"success": True}, ignored=True, no overwrite/Telegram
+        paid_dup_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            json={
+                "id": 880101,
+                "gateway": "MBBank",
+                "transactionDate": "2026-11-19 11:00:00",
+                "accountNumber": "0123456789",
+                "code": "DH9002",
+                "content": "Thanh toan DH9002 lan 2",
+                "transferType": "in",
+                "transferAmount": 500000,
+                "referenceCode": "FT26322880101",
+            },
+            headers={"Authorization": f"Apikey {sepay_client.webhook_secret}"},
+        )
+        assert paid_dup_resp.status_code == 200
+        paid_dup_data = paid_dup_resp.json()
+        assert paid_dup_data["success"] is True
+        assert paid_dup_data["ignored"] is True
+        assert paid_dup_data["reason"] == "order_already_paid"
+        assert paid_dup_data["order_status"] == "PAID"
+        assert "telegram_dispatch" not in paid_dup_data
+
+        stored_paid = erp_repository.get_order_by_code("DH9002")
+        assert stored_paid is not None
+        assert stored_paid.status == OrderStatus.PAID
+        assert stored_paid.sepay_transaction_id == "880100"
+
+        # 2. New tx ID for CANCELLED order -> 200 {"success": True}, ignored=True, no overwrite/Telegram
+        cancelled_resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            json={
+                "id": 880102,
+                "gateway": "MBBank",
+                "transactionDate": "2026-11-19 11:05:00",
+                "accountNumber": "0123456789",
+                "code": "DH9003",
+                "content": "Thanh toan DH9003 da huy",
+                "transferType": "in",
+                "transferAmount": 500000,
+                "referenceCode": "FT26322880102",
+            },
+            headers={"Authorization": f"Apikey {sepay_client.webhook_secret}"},
+        )
+        assert cancelled_resp.status_code == 200
+        cancelled_data = cancelled_resp.json()
+        assert cancelled_data["success"] is True
+        assert cancelled_data["ignored"] is True
+        assert cancelled_data["reason"] == "order_cancelled"
+        assert cancelled_data["order_status"] == "CANCELLED"
+        assert "telegram_dispatch" not in cancelled_data
+
+        stored_cancelled = erp_repository.get_order_by_code("DH9003")
+        assert stored_cancelled is not None
+        assert stored_cancelled.status == OrderStatus.CANCELLED
+        assert stored_cancelled.sepay_transaction_id is None
+
+    assert telegram_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sepay_webhook_unrecognized_auth_mode_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify an unrecognized `sepay_auth_mode` fails closed with HTTP 401 even with valid headers."""
+    monkeypatch.setattr(sepay_client, "auth_mode", "unrecognized-mode")
+
+    now_ts = str(int(time.time()))
+    raw_body = json.dumps(
+        {
+            "id": 880200,
+            "gateway": "MBBank",
+            "transactionDate": "2026-11-19 11:10:00",
+            "accountNumber": "0123456789",
+            "code": "DH1001",
+            "content": "DH1001",
+            "transferType": "in",
+            "transferAmount": 640000,
+            "referenceCode": "FT26322880200",
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    valid_sig = "sha256=" + hmac.new(
+        sepay_client.webhook_secret.encode("utf-8"),
+        f"{now_ts}.".encode() + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp_with_both = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=raw_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Apikey {sepay_client.webhook_secret}",
+                "X-SePay-Timestamp": now_ts,
+                "X-SePay-Signature": valid_sig,
+            },
+        )
+        assert resp_with_both.status_code == 401
+
+        resp_apikey_only = await client.post(
+            "/api/v1/webhooks/sepay",
+            content=raw_body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Apikey {sepay_client.webhook_secret}",
+            },
+        )
+        assert resp_apikey_only.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sepay_webhook_empty_secret_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify unconfigured/empty `sepay_client.webhook_secret` fails closed with HTTP 401."""
+    monkeypatch.setattr(sepay_client, "webhook_secret", "")
+
+    payload = {
+        "id": 880250,
+        "gateway": "MBBank",
+        "transactionDate": "2026-11-19 11:15:00",
+        "accountNumber": "0123456789",
+        "code": "DH1001",
+        "content": "DH1001",
+        "transferType": "in",
+        "transferAmount": 640000,
+        "referenceCode": "FT26322880250",
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for auth_header in (None, "Apikey ", "Apikey sepay-sandbox-secret"):
+            headers = {"Authorization": auth_header} if auth_header is not None else {}
+            resp = await client.post("/api/v1/webhooks/sepay", json=payload, headers=headers)
+            assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_sepay_strict_account_check_rejects_empty_and_none_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `matches_configured_account` returns False when `strict_account_check=True` and both fields are empty/None."""
+    monkeypatch.setattr(sepay_client, "strict_account_check", True)
+
+    assert sepay_client.matches_configured_account(None, None) is False
+    assert sepay_client.matches_configured_account("", None) is False
+    assert sepay_client.matches_configured_account("   ", "") is False
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/webhooks/sepay",
+            json={
+                "id": 880260,
+                "gateway": "MBBank",
+                "transactionDate": "2026-11-19 11:20:00",
+                "accountNumber": "",
+                "subAccount": None,
+                "code": "DH1001",
+                "content": "DH1001",
+                "transferType": "in",
+                "transferAmount": 640000,
+                "referenceCode": "FT26322880260",
+            },
+            headers={"Authorization": f"Apikey {sepay_client.webhook_secret}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["ignored"] is True
+        assert data["reason"] == "account_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_sepay_webhook_replay_of_ignored_or_underpaid_returns_no_telegram_dispatch() -> None:
+    """Verify replaying an ignored (outbound) or underpaid transaction returns `telegram_dispatch: None`."""
+    customer = erp_repository.list_customers()[0]
+    line_item = OrderLineItemRequest(
+        sku="COFFEE-ROBUSTA-1KG",
+        name="Fine Robusta Dak Lak Whole Bean 1kg",
+        quantity=1,
+        unit_price_vnd=500000,
+    )
+    erp_repository.create_order(
+        payload=OrderCreateRequest(customer_id=customer.id, items=[line_item]),
+        sepay_qr_url=sepay_client.generate_vietqr_url(amount_vnd=500000, order_code="DH9004"),
+        order_code="DH9004",
+    )
+
+    underpaid_payload = {
+        "id": 880300,
+        "gateway": "MBBank",
+        "transactionDate": "2026-11-19 11:25:00",
+        "accountNumber": "0123456789",
+        "code": "DH9004",
+        "content": "DH9004 thieu tien",
+        "transferType": "in",
+        "transferAmount": 100000,
+        "referenceCode": "FT26322880300",
+    }
+    ignored_outbound_payload = {
+        "id": 880301,
+        "gateway": "MBBank",
+        "transactionDate": "2026-11-19 11:26:00",
+        "accountNumber": "0123456789",
+        "code": "DH9004",
+        "content": "DH9004 outbound",
+        "transferType": "out",
+        "transferAmount": 500000,
+        "referenceCode": "FT26322880301",
+    }
+
+    headers = {"Authorization": f"Apikey {sepay_client.webhook_secret}"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # First delivery of underpaid & outbound transactions
+        first_underpaid = await client.post("/api/v1/webhooks/sepay", json=underpaid_payload, headers=headers)
+        assert first_underpaid.status_code == 200
+        assert first_underpaid.json()["reason"] == "underpayment"
+
+        first_ignored = await client.post("/api/v1/webhooks/sepay", json=ignored_outbound_payload, headers=headers)
+        assert first_ignored.status_code == 200
+        assert first_ignored.json()["ignored"] is True
+
+        # Replay of both must be idempotent and return telegram_dispatch: None
+        replay_underpaid = await client.post("/api/v1/webhooks/sepay", json=underpaid_payload, headers=headers)
+        assert replay_underpaid.status_code == 200
+        underpaid_replay_data = replay_underpaid.json()
+        assert underpaid_replay_data["success"] is True
+        assert underpaid_replay_data["idempotent_duplicate"] is True
+        assert underpaid_replay_data["telegram_dispatch"] is None
+
+        replay_ignored = await client.post("/api/v1/webhooks/sepay", json=ignored_outbound_payload, headers=headers)
+        assert replay_ignored.status_code == 200
+        ignored_replay_data = replay_ignored.json()
+        assert ignored_replay_data["success"] is True
+        assert ignored_replay_data["idempotent_duplicate"] is True
+        assert ignored_replay_data["telegram_dispatch"] is None

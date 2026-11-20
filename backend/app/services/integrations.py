@@ -2,14 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import html
+import logging
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+_DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
+_DEFAULT_HTTP_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+
+
+def _is_retryable_httpx_error(exc: BaseException) -> bool:
+    """Return True for transient httpx transport errors and retryable 429/5xx HTTP statuses."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in RETRYABLE_STATUS_CODES
+    return False
 
 
 class MetaGraphClient:
@@ -19,7 +44,85 @@ class MetaGraphClient:
         settings = get_settings()
         self.api_version = settings.meta_api_version
         self.access_token = settings.meta_access_token
+        self.app_secret = settings.meta_app_secret
         self.base_url = f"https://graph.facebook.com/{self.api_version}"
+        self._client: httpx.AsyncClient | None = None
+        self._client_cls: Any = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazily initialize and return a shared pooled `httpx.AsyncClient`."""
+        current_cls = httpx.AsyncClient
+        if (
+            self._client is None
+            or getattr(self._client, "is_closed", False)
+            or self._client_cls is not current_cls
+        ):
+            old_client = self._client
+            self._client = current_cls(
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+                limits=_DEFAULT_HTTP_LIMITS,
+            )
+            self._client_cls = current_cls
+            if old_client is not None and not getattr(old_client, "is_closed", False):
+                if hasattr(old_client, "aclose"):
+                    try:
+                        await old_client.aclose()
+                    except Exception:
+                        pass
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the shared pooled `httpx.AsyncClient` if initialized."""
+        client = self._client
+        self._client = None
+        self._client_cls = None
+        if client is not None and not getattr(client, "is_closed", False):
+            if hasattr(client, "aclose"):
+                await client.aclose()
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST JSON payload with bounded exponential backoff + jitter for transient failures."""
+        resp: httpx.Response | None = None
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential_jitter(initial=0.25, max=2.0),
+            retry=retry_if_exception(_is_retryable_httpx_error),
+            reraise=True,
+        ):
+            with attempt:
+                client = await self._get_client()
+                resp = await client.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+        assert resp is not None
+        return resp.json()
+
+    def verify_webhook_signature(
+        self, raw_body: bytes, signature_header: str | None
+    ) -> bool:
+        """Verify Meta `X-Hub-Signature-256` HMAC-SHA256 signature over raw request body (fail-closed)."""
+        secret = (self.app_secret or "").strip()
+        if not secret or not signature_header:
+            return False
+        sig = signature_header.strip()
+        if not sig.lower().startswith("sha256="):
+            return False
+        expected_hex = hmac.new(
+            secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        expected_sig = f"sha256={expected_hex}"
+        return hmac.compare_digest(sig.lower(), expected_sig.lower())
 
     async def send_message(self, recipient_psid: str, text: str) -> dict[str, Any]:
         """Send a Messenger/Instagram DM reply via Meta Send API."""
@@ -37,14 +140,27 @@ class MetaGraphClient:
             }
 
         url = f"{self.base_url}/me/messages"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        try:
+            return await self._post_with_retry(
                 url,
-                params={"access_token": self.access_token},
-                json=payload,
+                headers=headers,
+                payload=payload,
             )
-            resp.raise_for_status()
-            return resp.json()
+        except httpx.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "Meta Graph API send_message failed (error_type=%s, status_code=%s)",
+                type(exc).__name__,
+                status_code,
+            )
+            return {
+                "delivered": False,
+                "error": "Meta Graph API HTTP error",
+                "status_code": status_code,
+            }
 
     async def send_private_reply(self, comment_id: str, text: str) -> dict[str, Any]:
         """Send a Private Reply DM to a public Facebook/Instagram post comment."""
@@ -61,18 +177,31 @@ class MetaGraphClient:
             }
 
         url = f"{self.base_url}/me/messages"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        try:
+            return await self._post_with_retry(
                 url,
-                params={"access_token": self.access_token},
-                json=payload,
+                headers=headers,
+                payload=payload,
             )
-            resp.raise_for_status()
-            return resp.json()
+        except httpx.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "Meta Graph API send_private_reply failed (error_type=%s, status_code=%s)",
+                type(exc).__name__,
+                status_code,
+            )
+            return {
+                "delivered": False,
+                "error": "Meta Graph API HTTP error",
+                "status_code": status_code,
+            }
 
 
 class SePayClient:
-    """SePay Sandbox API client for dynamic VietQR generation and IPN order code extraction."""
+    """SePay Webhooks & Dynamic VietQR client aligned with developer.sepay.vn specs."""
 
     ORDER_CODE_PATTERN = re.compile(r"\b(DH\d+)\b", re.IGNORECASE)
 
@@ -82,41 +211,168 @@ class SePayClient:
         self.account_number = settings.sepay_account_number
         self.bank_code = settings.sepay_bank_code
         self.webhook_secret = settings.sepay_webhook_secret
+        self.auth_mode = settings.sepay_auth_mode.lower()
+        self.payment_prefix = settings.sepay_payment_prefix or "DH"
+        self.memo_prefix = settings.sepay_memo_prefix
+        self.qr_template = settings.sepay_qr_template
+        self.timestamp_tolerance_seconds = settings.sepay_timestamp_tolerance_seconds
+        self.strict_account_check = settings.sepay_strict_account_check
+        self._order_code_pattern = re.compile(
+            rf"\b({re.escape(self.payment_prefix)}\d+)\b",
+            re.IGNORECASE,
+        )
         self._processed_transactions: set[str] = set()
 
     def generate_vietqr_url(self, amount_vnd: int, order_code: str) -> str:
-        """Generate a dynamic SePay VietQR image URL embedding amount and order code."""
-        encoded_desc = quote(order_code.upper())
-        return (
-            f"https://qr.sepay.vn/img?acc={self.account_number}"
-            f"&bank={self.bank_code}&amount={amount_vnd}&des={encoded_desc}"
+        """Generate a dynamic SePay VietQR image URL embedding amount, memo prefix, and order code."""
+        prefix = (self.memo_prefix or "").strip()
+        clean_code = order_code.strip().upper()
+        memo_text = f"{prefix} {clean_code}".strip() if prefix else clean_code
+        encoded_desc = quote(memo_text)
+        url = (
+            f"https://qr.sepay.vn/img?acc={quote(self.account_number)}"
+            f"&bank={quote(self.bank_code)}&amount={amount_vnd}&des={encoded_desc}"
         )
+        if self.qr_template:
+            url += f"&template={quote(self.qr_template)}"
+        return url
 
-    def extract_order_code(self, content: str, explicit_code: str | None = None) -> str | None:
-        """Extract canonical order code (e.g. `DH1001`) from bank transfer description."""
+    def extract_order_code(self, content: str | None, explicit_code: str | None = None) -> str | None:
+        """Extract canonical order code (e.g. `DH1001`) preferring SePay-parsed `code` over content regex."""
+        payment_prefix = (self.payment_prefix or "DH").strip() or "DH"
+        memo_prefix = (self.memo_prefix or "").strip()
+
         if explicit_code and explicit_code.strip():
-            return explicit_code.strip().upper()
-        match = self.ORDER_CODE_PATTERN.search(content or "")
+            cleaned_explicit = explicit_code.strip().upper()
+            explicit_match = re.search(
+                rf"({re.escape(payment_prefix)}\d+)\b",
+                cleaned_explicit,
+                re.IGNORECASE,
+            )
+            if explicit_match and memo_prefix and cleaned_explicit.startswith(memo_prefix.upper()):
+                return explicit_match.group(1).upper()
+            return cleaned_explicit
+
+        text = content or ""
+        if not text:
+            return None
+
+        # 1. Standard word-boundary match (e.g. "SEVQR DH1001" or "chuyen khoan DH1001")
+        word_pattern = re.compile(rf"\b({re.escape(payment_prefix)}\d+)\b", re.IGNORECASE)
+        match = word_pattern.search(text)
         if match:
             return match.group(1).upper()
+
+        # 2. Configured memo_prefix + optional space + order code (e.g. "SEVQRDH1001" or "SEVQR DH1001")
+        if memo_prefix:
+            prefixed_pattern = re.compile(
+                rf"{re.escape(memo_prefix)}\s*({re.escape(payment_prefix)}\d+)\b",
+                re.IGNORECASE,
+            )
+            prefixed_match = prefixed_pattern.search(text)
+            if prefixed_match:
+                return prefixed_match.group(1).upper()
+
+        # 3. Fallback for smushed/non-spaced bank memos (e.g. "ABC123DH1001")
+        fallback_pattern = re.compile(rf"({re.escape(payment_prefix)}\d+)\b", re.IGNORECASE)
+        fallback_match = fallback_pattern.search(text)
+        if fallback_match:
+            return fallback_match.group(1).upper()
         return None
 
     def verify_webhook_authorization(self, authorization_header: str | None) -> bool:
-        """Verify SePay IPN `Authorization: Apikey <SECRET>` header using constant-time comparison.
-
-        Fails closed (`False`) when the header or secret is missing.
-        """
+        """Verify SePay `Authorization: Apikey <SECRET>` header using constant-time comparison."""
         if not authorization_header or not self.webhook_secret:
             return False
         expected = f"Apikey {self.webhook_secret}"
         return hmac.compare_digest(authorization_header.strip(), expected)
 
+    def verify_webhook_hmac(
+        self,
+        raw_body: bytes,
+        signature_header: str | None,
+        timestamp_header: str | None,
+        now_ts: int | None = None,
+    ) -> bool:
+        """Verify SePay HMAC-SHA256 (`X-SePay-Signature` / `X-SePay-Timestamp`) over raw request body."""
+        if not self.webhook_secret or not signature_header or not timestamp_header:
+            return False
+        try:
+            timestamp_val = int(timestamp_header.strip())
+        except ValueError:
+            return False
+
+        current_ts = int(time.time()) if now_ts is None else now_ts
+        if abs(current_ts - timestamp_val) > self.timestamp_tolerance_seconds:
+            return False
+
+        signed_payload = f"{timestamp_val}.".encode() + raw_body
+        expected_hex = hmac.new(
+            self.webhook_secret.encode("utf-8"),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        expected_sig = f"sha256={expected_hex}"
+        return hmac.compare_digest(signature_header.strip().lower(), expected_sig.lower())
+
+    def verify_webhook_request(
+        self,
+        raw_body: bytes,
+        authorization_header: str | None = None,
+        signature_header: str | None = None,
+        timestamp_header: str | None = None,
+        now_ts: int | None = None,
+    ) -> bool:
+        """Verify inbound SePay webhook request using configured `sepay_auth_mode` (fail-closed)."""
+        if not self.webhook_secret:
+            return False
+
+        mode = self.auth_mode
+        has_hmac_headers = bool(signature_header or timestamp_header)
+
+        if mode == "hmac":
+            return self.verify_webhook_hmac(
+                raw_body=raw_body,
+                signature_header=signature_header,
+                timestamp_header=timestamp_header,
+                now_ts=now_ts,
+            )
+        if mode == "apikey":
+            return self.verify_webhook_authorization(authorization_header)
+
+        if mode == "both":
+            # Default "both": if HMAC headers are present, enforce HMAC; otherwise verify API Key.
+            if has_hmac_headers:
+                return self.verify_webhook_hmac(
+                    raw_body=raw_body,
+                    signature_header=signature_header,
+                    timestamp_header=timestamp_header,
+                    now_ts=now_ts,
+                )
+            return self.verify_webhook_authorization(authorization_header)
+
+        return False
+
+    def matches_configured_account(
+        self, account_number: str | None, sub_account: str | None
+    ) -> bool:
+        """Check whether webhook account fields match configured account when strict check is enabled."""
+        if not self.strict_account_check or not self.account_number:
+            return True
+        expected = self.account_number.strip()
+        candidates = [
+            val.strip()
+            for val in (account_number, sub_account)
+            if val is not None and val.strip()
+        ]
+        return expected in candidates
+
     def is_transaction_processed(self, transaction_id: str) -> bool:
-        """Check whether a SePay IPN transaction ID has already been processed."""
+        """Check whether a SePay transaction ID has already been processed."""
         return transaction_id in self._processed_transactions
 
     def mark_transaction_processed(self, transaction_id: str) -> None:
-        """Record a SePay IPN transaction ID as processed for idempotency (`U-15`)."""
+        """Record a SePay transaction ID as processed for idempotency (`U-15`)."""
         self._processed_transactions.add(transaction_id)
 
 
@@ -126,6 +382,60 @@ class TelegramDispatchClient:
     def __init__(self) -> None:
         settings = get_settings()
         self.bot_token = settings.telegram_bot_token
+        self._client: httpx.AsyncClient | None = None
+        self._client_cls: Any = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazily initialize and return a shared pooled `httpx.AsyncClient`."""
+        current_cls = httpx.AsyncClient
+        if (
+            self._client is None
+            or getattr(self._client, "is_closed", False)
+            or self._client_cls is not current_cls
+        ):
+            old_client = self._client
+            self._client = current_cls(
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+                limits=_DEFAULT_HTTP_LIMITS,
+            )
+            self._client_cls = current_cls
+            if old_client is not None and not getattr(old_client, "is_closed", False):
+                if hasattr(old_client, "aclose"):
+                    try:
+                        await old_client.aclose()
+                    except Exception:
+                        pass
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the shared pooled `httpx.AsyncClient` if initialized."""
+        client = self._client
+        self._client = None
+        self._client_cls = None
+        if client is not None and not getattr(client, "is_closed", False):
+            if hasattr(client, "aclose"):
+                await client.aclose()
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST JSON payload with bounded exponential backoff + jitter for transient failures."""
+        resp: httpx.Response | None = None
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential_jitter(initial=0.25, max=2.0),
+            retry=retry_if_exception(_is_retryable_httpx_error),
+            reraise=True,
+        ):
+            with attempt:
+                client = await self._get_client()
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+        assert resp is not None
+        return resp.json()
 
     async def dispatch_order_alert(
         self,
@@ -133,18 +443,30 @@ class TelegramDispatchClient:
         order_code: str,
         total_amount_vnd: int,
         items_summary: str,
+        customer_name: str | None = None,
+        sepay_reference: str | None = None,
     ) -> dict[str, Any]:
-        """Send an instant order fulfillment message to a staff member's `telegram_user_id`."""
-        message_text = (
-            f"🔔 *[NEW PAID ORDER — {order_code}]*\n"
-            f"💰 Amount: `{total_amount_vnd:,} VND` (SePay VietQR Confirmed)\n"
-            f"📦 Items: {items_summary}\n"
-            f"⚡ Please pack and transition status to *FULFILLING* in the ERP Admin Panel."
+        """Send an instant HTML-escaped order fulfillment message to a staff member's `telegram_user_id`."""
+        escaped_order_code = html.escape(str(order_code))
+        escaped_amount = html.escape(f"{total_amount_vnd:,} VND")
+        escaped_items = html.escape(str(items_summary))
+        lines = [
+            f"🔔 <b>[NEW PAID ORDER — {escaped_order_code}]</b>",
+            f"💰 Amount: <code>{escaped_amount}</code> (SePay VietQR Confirmed)",
+        ]
+        if customer_name:
+            lines.append(f"👤 Customer: {html.escape(str(customer_name))}")
+        lines.append(f"📦 Items: {escaped_items}")
+        if sepay_reference:
+            lines.append(f"🧾 Reference: <code>{html.escape(str(sepay_reference))}</code>")
+        lines.append(
+            "⚡ Please pack and transition status to <b>FULFILLING</b> in the ERP Admin Panel."
         )
+        message_text = "\n".join(lines)
         payload = {
             "chat_id": telegram_user_id,
             "text": message_text,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
         }
 
         if not self.bot_token or self.bot_token.startswith("123456789:"):
@@ -157,18 +479,57 @@ class TelegramDispatchClient:
             }
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
+        try:
+            telegram_response = await self._post_with_retry(url, payload=payload)
             return {
                 "dispatched": True,
                 "simulated": False,
                 "telegram_user_id": telegram_user_id,
                 "order_code": order_code,
-                "telegram_response": resp.json(),
+                "telegram_response": telegram_response,
+            }
+        except httpx.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "Telegram Bot API dispatch failed for order=%s (error_type=%s, status_code=%s)",
+                order_code,
+                type(exc).__name__,
+                status_code,
+            )
+            return {
+                "dispatched": False,
+                "simulated": False,
+                "telegram_user_id": telegram_user_id,
+                "order_code": order_code,
+                "error": "Telegram Bot API HTTP error",
+                "status_code": status_code,
+                "error_type": type(exc).__name__,
+            }
+        except Exception as exc:
+            logger.warning(
+                "Telegram Bot API dispatch failed unexpectedly for order=%s (error_type=%s)",
+                order_code,
+                type(exc).__name__,
+            )
+            return {
+                "dispatched": False,
+                "simulated": False,
+                "telegram_user_id": telegram_user_id,
+                "order_code": order_code,
+                "error": "Telegram Bot API dispatch error",
+                "status_code": None,
+                "error_type": type(exc).__name__,
             }
 
 
 meta_graph_client = MetaGraphClient()
 sepay_client = SePayClient()
 telegram_dispatch_client = TelegramDispatchClient()
+
+
+async def close_integration_clients() -> None:
+    """Close shared pooled `httpx.AsyncClient` instances across integration singletons."""
+    await meta_graph_client.aclose()
+    await telegram_dispatch_client.aclose()
