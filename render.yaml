@@ -48,6 +48,14 @@ services:
         value: "true"
       - key: SEPAY_QR_TEMPLATE
         value: compact
+      - key: SEPAY_PG_MERCHANT_ID
+        sync: false
+      - key: SEPAY_PG_SECRET_KEY
+        sync: false
+      - key: SEPAY_PG_IPN_SECRET
+        sync: false
+      - key: SEPAY_PG_ENV
+        value: sandbox
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: CORS_ORIGINS

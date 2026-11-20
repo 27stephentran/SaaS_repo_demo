@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     sepay_timestamp_tolerance_seconds: int = 300
     sepay_strict_account_check: bool = False
 
+    # SePay Payment Gateway (Cổng thanh toán)
+    sepay_pg_merchant_id: str = ""
+    sepay_pg_secret_key: str = ""
+    sepay_pg_ipn_secret: str = ""
+    sepay_pg_env: str = "sandbox"  # "sandbox" | "production"
+
     # Telegram Bot API (Staff Dispatch)
     telegram_bot_token: str = ""
 

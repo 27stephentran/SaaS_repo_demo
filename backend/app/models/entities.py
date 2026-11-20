@@ -515,6 +515,77 @@ class SePayIPNWebhookPayload(BaseModel):
 SepayWebhookPayload = SePayIPNWebhookPayload
 
 
+class SePayGatewayOrderInfo(BaseModel):
+    """Nested `order` block inside SePay Payment Gateway IPN payloads."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    order_id: str | None = None
+    order_status: str | None = None
+    order_currency: str | None = None
+    order_amount: str | int | float | None = None
+    order_invoice_number: str | None = None
+    order_description: str | None = None
+    merchant: str | None = None
+
+
+class SePayGatewayTransactionInfo(BaseModel):
+    """Nested `transaction` block inside SePay Payment Gateway IPN payloads."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    payment_method: str | None = None
+    transaction_id: str | None = None
+    transaction_type: str | None = None
+    transaction_date: str | None = None
+    transaction_status: str | None = None
+    transaction_amount: str | int | float | None = None
+    transaction_currency: str | None = None
+
+
+class SePayGatewayCustomerInfo(BaseModel):
+    """Nested `customer` block inside SePay Payment Gateway IPN payloads."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    customer_id: str | None = None
+
+
+class SePayGatewayIPNPayload(BaseModel):
+    """Inbound SePay Payment Gateway IPN payload (`ORDER_PAID`, `TRANSACTION_VOID`, etc.)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    timestamp: int | str | None = None
+    notification_type: str
+    order: SePayGatewayOrderInfo | None = None
+    transaction: SePayGatewayTransactionInfo | None = None
+    customer: SePayGatewayCustomerInfo | None = None
+
+
+class SePayCheckoutRequest(BaseModel):
+    """Optional checkout initiation parameters for SePay Payment Gateway."""
+
+    payment_method: str | None = None
+    success_url: str | None = None
+    error_url: str | None = None
+    cancel_url: str | None = None
+    lang: str = "vi"
+
+
+class SePayCheckoutFormResponse(BaseModel):
+    """Server-signed SePay Payment Gateway checkout form payload."""
+
+    checkout_url: str
+    fields: dict[str, Any]
+    order_id: UUID | None = None
+    order_code: str | None = None
+    total_amount_vnd: int | None = None
+
+
 class TokenIssueRequest(BaseModel):
     """Request payload for issuing a tenant-scoped JWT access/refresh token pair."""
 

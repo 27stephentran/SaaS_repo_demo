@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 
 from app.core.auth import AuthenticatedUser, get_current_user, resolve_authenticated_tenant
 from app.models.entities import (
@@ -17,10 +17,14 @@ from app.models.entities import (
     InventorySearchRequest,
     OrderCreateRequest,
     OrderResponse,
+    OrderStatus,
     OrderStatusUpdateRequest,
+    SePayCheckoutFormResponse,
+    SePayCheckoutRequest,
     WebhookLogResponse,
 )
 from app.services.ai_rag import sales_rag_engine
+from app.services.integrations import sepay_client
 from app.services.order_service import order_service
 
 router = APIRouter(prefix="/api/v1/erp", tags=["ERP"])
@@ -174,6 +178,74 @@ async def update_order_status(
         new_status=payload.status,
         tenant_id=effective_tenant,
         actor_role=current_user.role,
+    )
+
+
+@router.post(
+    "/orders/{order_id}/sepay-checkout",
+    response_model=SePayCheckoutFormResponse,
+)
+async def create_sepay_checkout(
+    order_id: UUID,
+    current_user: CurrentUserDep,
+    payload: Annotated[SePayCheckoutRequest | None, Body()] = None,
+    tenant_id: str | None = Query(default=None),
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
+) -> SePayCheckoutFormResponse:
+    """Build a server-signed SePay Payment Gateway checkout form for a pending order."""
+    effective_tenant = resolve_authenticated_tenant(
+        current_user,
+        requested_tenant_id=tenant_id,
+        header_tenant_id=x_tenant_id,
+    )
+    order = await order_service._get_order(order_id=order_id, tenant_id=effective_tenant)
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Order {order_id} not found",
+        )
+    if order.status != OrderStatus.PENDING_PAYMENT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Order {order.order_code} is {order.status.value}, expected PENDING_PAYMENT",
+        )
+    if not (sepay_client.pg_merchant_id or "").strip() or not (
+        sepay_client.pg_secret_key or ""
+    ).strip():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SePay Payment Gateway credentials are not configured",
+        )
+    if order.total_amount_vnd <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Order {order.order_code} total amount must be positive for checkout",
+        )
+
+    try:
+        form = sepay_client.build_checkout_form(
+            order_code=order.order_code,
+            amount_vnd=order.total_amount_vnd,
+            description=f"Thanh toan don hang {order.order_code}",
+            customer_id=str(order.customer_id),
+            payment_method=payload.payment_method if payload else None,
+            success_url=payload.success_url if payload else None,
+            error_url=payload.error_url if payload else None,
+            cancel_url=payload.cancel_url if payload else None,
+            lang=payload.lang if payload else "vi",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    return SePayCheckoutFormResponse(
+        checkout_url=form["checkout_url"],
+        fields=form["fields"],
+        order_id=order.id,
+        order_code=order.order_code,
+        total_amount_vnd=order.total_amount_vnd,
     )
 
 

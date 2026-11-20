@@ -25,6 +25,7 @@ from app.models.entities import (
     OrderLineItemRequest,
     OrderResponse,
     OrderStatus,
+    SePayGatewayIPNPayload,
     SePayIPNWebhookPayload,
 )
 from app.services.ai_rag import sales_rag_engine
@@ -142,12 +143,16 @@ async def _fetch_sepay_webhook_log(
     return erp_repository.get_sepay_webhook_log(transaction_id)
 
 
-async def _persist_sepay_event(
+async def _persist_sepay_event_fields(
     *,
     transaction_id: str,
     tenant_id: str,
     order_code: str | None,
-    payload: SePayIPNWebhookPayload,
+    transfer_type: str,
+    transfer_amount: int,
+    account_number: str | None,
+    sub_account: str | None,
+    reference_code: str | None,
     raw_payload_dict: dict[str, Any],
     processing_status: str,
     mark_paid: bool = False,
@@ -157,11 +162,11 @@ async def _persist_sepay_event(
         inserted = await erp_repository.persist_sepay_webhook_to_db(
             transaction_id=transaction_id,
             order_code=order_code,
-            transfer_type=payload.transferType,
-            transfer_amount=payload.transferAmount,
-            account_number=payload.accountNumber,
-            sub_account=payload.subAccount,
-            reference_code=payload.referenceCode,
+            transfer_type=transfer_type,
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=sub_account,
+            reference_code=reference_code,
             processing_status=processing_status,
             raw_payload=raw_payload_dict,
             mark_paid=mark_paid,
@@ -180,14 +185,14 @@ async def _persist_sepay_event(
     inserted = erp_repository.record_sepay_webhook_log(
         transaction_id=transaction_id,
         order_code=order_code,
-        transfer_type=payload.transferType,
-        transfer_amount=payload.transferAmount,
+        transfer_type=transfer_type,
+        transfer_amount=transfer_amount,
         processing_status=processing_status,
         raw_payload=raw_payload_dict,
         tenant_id=tenant_id,
-        account_number=payload.accountNumber,
-        sub_account=payload.subAccount,
-        reference_code=payload.referenceCode,
+        account_number=account_number,
+        sub_account=sub_account,
+        reference_code=reference_code,
     )
     sepay_client.mark_transaction_processed(transaction_id)
     if not inserted:
@@ -201,6 +206,32 @@ async def _persist_sepay_event(
             tenant_id=tenant_id,
         )
     return True, updated_order
+
+
+async def _persist_sepay_event(
+    *,
+    transaction_id: str,
+    tenant_id: str,
+    order_code: str | None,
+    payload: SePayIPNWebhookPayload,
+    raw_payload_dict: dict[str, Any],
+    processing_status: str,
+    mark_paid: bool = False,
+) -> tuple[bool, OrderResponse | None]:
+    """Persist a SePay bank-transfer webhook payload via `_persist_sepay_event_fields`."""
+    return await _persist_sepay_event_fields(
+        transaction_id=transaction_id,
+        tenant_id=tenant_id,
+        order_code=order_code,
+        transfer_type=payload.transferType,
+        transfer_amount=payload.transferAmount,
+        account_number=payload.accountNumber,
+        sub_account=payload.subAccount,
+        reference_code=payload.referenceCode,
+        raw_payload_dict=raw_payload_dict,
+        processing_status=processing_status,
+        mark_paid=mark_paid,
+    )
 
 
 async def _select_target_employees(
@@ -266,6 +297,459 @@ async def _dispatch_sepay_telegram_alerts(
                 error_message=f"Telegram Bot API dispatch failed ({type(exc).__name__})",
                 tenant_id=tenant_id,
             )
+
+
+async def _enqueue_and_dispatch_telegram_alerts(
+    *,
+    background_tasks: BackgroundTasks,
+    updated_order: OrderResponse,
+    tenant_id: str,
+) -> dict[str, Any] | None:
+    """Enqueue `telegram_dispatch` outbox jobs for active tenant staff and schedule execution."""
+    target_employees = await _select_target_employees(
+        assigned_employee_id=updated_order.assigned_employee_id,
+        tenant_id=tenant_id,
+    )
+    if not target_employees:
+        return None
+
+    items_summary = ", ".join(
+        f"{item.get('quantity', 1)}x {item.get('sku', 'ITEM')}"
+        for item in updated_order.items_json
+    )
+    has_live_bot = bool(
+        telegram_dispatch_client.bot_token
+        and not telegram_dispatch_client.bot_token.startswith("123456789:")
+    )
+    outbox_job_ids: list[str] = []
+    dispatches: list[tuple[UUID, str]] = []
+    for employee in target_employees:
+        job_id = await erp_repository.enqueue_outbox_job(
+            job_type="telegram_dispatch",
+            payload={
+                "order_id": str(updated_order.id),
+                "order_code": updated_order.order_code,
+                "total_amount_vnd": updated_order.total_amount_vnd,
+                "items_summary": items_summary,
+                "employee_id": str(employee.id),
+                "telegram_user_id": employee.telegram_user_id,
+            },
+            tenant_id=tenant_id,
+        )
+        outbox_job_ids.append(str(job_id))
+        dispatches.append((job_id, employee.telegram_user_id))
+
+    background_tasks.add_task(
+        _dispatch_sepay_telegram_alerts,
+        dispatches=dispatches,
+        order_code=updated_order.order_code,
+        total_amount_vnd=updated_order.total_amount_vnd,
+        items_summary=items_summary,
+        tenant_id=tenant_id,
+    )
+
+    primary_employee = target_employees[0]
+    return {
+        "dispatched": True,
+        "queued": True,
+        "simulated": not has_live_bot,
+        "telegram_user_id": primary_employee.telegram_user_id,
+        "recipient_count": len(target_employees),
+        "order_code": updated_order.order_code,
+        "outbox_job_ids": outbox_job_ids,
+    }
+
+
+def _parse_pg_amount(value: Any) -> int:
+    """Parse SePay Payment Gateway numeric/string amounts cleanly into integer VND."""
+    if value is None or value == "":
+        return 0
+    try:
+        return max(0, int(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_gateway_ipn_request(raw_body: bytes, x_secret_key: str | None) -> bool:
+    """Return True when inbound SePay request targets Payment Gateway IPN instead of Bank Transfer."""
+    if x_secret_key is not None:
+        return True
+    try:
+        parsed = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(parsed, dict)
+        and "notification_type" in parsed
+        and "order" in parsed
+    )
+
+
+async def _handle_sepay_gateway_ipn(
+    *,
+    raw_body: bytes,
+    background_tasks: BackgroundTasks,
+    x_secret_key: str | None,
+) -> dict[str, Any]:
+    """Verify and process SePay Payment Gateway IPNs (`ORDER_PAID`, `TRANSACTION_VOID`, etc.)."""
+    if not sepay_client.verify_pg_ipn_secret(x_secret_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid SePay Payment Gateway IPN secret",
+        )
+
+    try:
+        pg_payload = SePayGatewayIPNPayload.model_validate_json(raw_body)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors(),
+        ) from exc
+
+    raw_payload_dict = json.loads(raw_body.decode("utf-8"))
+    settings = get_settings()
+    is_prod = _is_production_env()
+
+    order_info = pg_payload.order
+    tx_info = pg_payload.transaction
+    notification_type = (pg_payload.notification_type or "").strip().upper()
+
+    merchant_candidate = (
+        (order_info.merchant if order_info and order_info.merchant else None)
+        or (raw_payload_dict.get("merchant") if isinstance(raw_payload_dict, dict) else None)
+        or sepay_client.pg_merchant_id
+        or ""
+    )
+    resolved_tenant: str | None = None
+    for ext_id in (
+        str(merchant_candidate).strip(),
+        (sepay_client.account_number or "").strip(),
+    ):
+        if ext_id:
+            resolved_tenant = await erp_repository.resolve_channel_tenant("sepay_account", ext_id)
+            if resolved_tenant is not None:
+                break
+
+    if resolved_tenant is None:
+        if is_prod:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unregistered SePay Payment Gateway channel",
+            )
+        tenant_id = settings.default_tenant_id
+    else:
+        tenant_id = resolved_tenant
+
+    raw_tx_id = (
+        (tx_info.transaction_id if tx_info and tx_info.transaction_id else None)
+        or (tx_info.id if tx_info and tx_info.id else None)
+        or (order_info.id if order_info and order_info.id else None)
+        or (order_info.order_id if order_info and order_info.order_id else None)
+    )
+    transaction_id = (
+        str(raw_tx_id).strip()[:128]
+        if raw_tx_id and str(raw_tx_id).strip()
+        else f"pg-{hashlib.sha256(raw_body).hexdigest()[:24]}"
+    )
+
+    raw_invoice = (
+        (order_info.order_invoice_number if order_info and order_info.order_invoice_number else None)
+        or (order_info.order_id if order_info and order_info.order_id else None)
+    )
+    order_code = (
+        str(raw_invoice).strip().upper()[:64]
+        if raw_invoice and str(raw_invoice).strip()
+        else None
+    )
+
+    if tx_info is not None and tx_info.transaction_amount not in (None, ""):
+        transfer_amount = _parse_pg_amount(tx_info.transaction_amount)
+    elif order_info is not None and order_info.order_amount not in (None, ""):
+        transfer_amount = _parse_pg_amount(order_info.order_amount)
+    else:
+        transfer_amount = 0
+
+    reference_code_raw = (
+        (tx_info.transaction_id if tx_info and tx_info.transaction_id else None)
+        or (order_info.order_id if order_info and order_info.order_id else None)
+        or transaction_id
+    )
+    reference_code = str(reference_code_raw).strip()[:128] if reference_code_raw else None
+    account_number = str(merchant_candidate).strip()[:64] or None
+
+    pg_active = await erp_repository.is_postgres_active()
+    existing_log = await _fetch_sepay_webhook_log(transaction_id=transaction_id, tenant_id=tenant_id)
+    if existing_log is not None or (
+        not pg_active and sepay_client.is_transaction_processed(transaction_id)
+    ):
+        existing_order = (
+            await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+            if order_code
+            else None
+        )
+        is_processed = bool(existing_log and existing_log.get("processing_status") == "PROCESSED")
+        telegram_dispatch: dict[str, Any] | None = None
+        if is_processed:
+            target_employees = await _select_target_employees(
+                assigned_employee_id=(
+                    existing_order.assigned_employee_id if existing_order else None
+                ),
+                tenant_id=tenant_id,
+            )
+            primary_emp = target_employees[0] if target_employees else None
+            telegram_dispatch = {
+                "dispatched": True,
+                "simulated": True,
+                "idempotent_duplicate": True,
+                "telegram_user_id": primary_emp.telegram_user_id if primary_emp else "",
+                "order_code": order_code,
+            }
+        return {
+            "success": True,
+            "idempotent_duplicate": True,
+            "notification_type": notification_type,
+            "order_code": existing_order.order_code if existing_order else order_code,
+            "order_status": (
+                existing_order.status.value
+                if existing_order
+                else (existing_log.get("processing_status", "IGNORED") if existing_log else "PAID")
+            ),
+            "sepay_transaction_id": transaction_id,
+            "telegram_dispatch": telegram_dispatch,
+        }
+
+    if notification_type != "ORDER_PAID":
+        proc_status = f"IGNORED_{notification_type or 'PG_EVENT'}"[:32]
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status=proc_status,
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": f"notification_{notification_type.lower()}",
+            "notification_type": notification_type,
+            "order_code": order_code,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    order_status_val = (order_info.order_status or "").strip().upper() if order_info else ""
+    tx_status_val = (tx_info.transaction_status or "").strip().upper() if tx_info else ""
+    if order_status_val != "CAPTURED" and tx_status_val != "APPROVED":
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status="IGNORED_UNCAPTURED",
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": "order_not_captured",
+            "notification_type": notification_type,
+            "order_code": order_code,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    raw_currency = (
+        (tx_info.transaction_currency if tx_info and tx_info.transaction_currency else None)
+        or (order_info.order_currency if order_info and order_info.order_currency else None)
+        or "VND"
+    )
+    if str(raw_currency).strip().upper() != "VND":
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status="IGNORED_CURRENCY",
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": "currency_mismatch",
+            "notification_type": notification_type,
+            "order_code": order_code,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    if not order_code:
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=None,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status="IGNORED_NO_ORDER_CODE",
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": "no_order_code",
+            "notification_type": notification_type,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    existing_order = await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+    if existing_order is None:
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status="UNMATCHED_ORDER",
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": "order_not_found",
+            "notification_type": notification_type,
+            "order_code": order_code,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    if existing_order.status != OrderStatus.PENDING_PAYMENT:
+        is_cancelled = existing_order.status == OrderStatus.CANCELLED
+        proc_status = "IGNORED_CANCELLED" if is_cancelled else "IGNORED_ALREADY_PAID"
+        reason = "order_cancelled" if is_cancelled else "order_already_paid"
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=existing_order.order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status=proc_status,
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "ignored": True,
+            "reason": reason,
+            "notification_type": notification_type,
+            "order_code": existing_order.order_code,
+            "order_status": existing_order.status.value,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    if transfer_amount < existing_order.total_amount_vnd:
+        inserted, _ = await _persist_sepay_event_fields(
+            transaction_id=transaction_id,
+            tenant_id=tenant_id,
+            order_code=existing_order.order_code,
+            transfer_type="pg_ipn",
+            transfer_amount=transfer_amount,
+            account_number=account_number,
+            sub_account=None,
+            reference_code=reference_code,
+            raw_payload_dict=raw_payload_dict,
+            processing_status="UNDERPAID",
+            mark_paid=False,
+        )
+        return {
+            "success": True,
+            "idempotent_duplicate": not inserted,
+            "payment_verified": False,
+            "reason": "underpayment",
+            "notification_type": notification_type,
+            "order_code": existing_order.order_code,
+            "order_status": existing_order.status.value,
+            "expected_amount_vnd": existing_order.total_amount_vnd,
+            "received_amount_vnd": transfer_amount,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    inserted, updated_order = await _persist_sepay_event_fields(
+        transaction_id=transaction_id,
+        tenant_id=tenant_id,
+        order_code=existing_order.order_code,
+        transfer_type="pg_ipn",
+        transfer_amount=transfer_amount,
+        account_number=account_number,
+        sub_account=None,
+        reference_code=reference_code,
+        raw_payload_dict=raw_payload_dict,
+        processing_status="PROCESSED",
+        mark_paid=True,
+    )
+    if not inserted:
+        return {
+            "success": True,
+            "idempotent_duplicate": True,
+            "notification_type": notification_type,
+            "order_code": existing_order.order_code,
+            "order_status": existing_order.status.value,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    if updated_order is None or updated_order.status != OrderStatus.PAID:
+        return {
+            "success": True,
+            "idempotent_duplicate": False,
+            "ignored": True,
+            "reason": "order_not_pending_payment",
+            "notification_type": notification_type,
+            "order_code": existing_order.order_code,
+            "order_status": updated_order.status.value if updated_order else existing_order.status.value,
+            "sepay_transaction_id": transaction_id,
+        }
+
+    telegram_dispatch_result = await _enqueue_and_dispatch_telegram_alerts(
+        background_tasks=background_tasks,
+        updated_order=updated_order,
+        tenant_id=tenant_id,
+    )
+    return {
+        "success": True,
+        "idempotent_duplicate": False,
+        "notification_type": notification_type,
+        "order_code": updated_order.order_code,
+        "order_status": updated_order.status.value,
+        "sepay_transaction_id": updated_order.sepay_transaction_id,
+        "telegram_dispatch": telegram_dispatch_result,
+    }
 
 
 @router.get("/meta", response_class=PlainTextResponse)
@@ -645,9 +1129,17 @@ async def handle_sepay_ipn(
     authorization: str | None = Header(default=None),
     x_sepay_signature: str | None = Header(default=None, alias="X-SePay-Signature"),
     x_sepay_timestamp: str | None = Header(default=None, alias="X-SePay-Timestamp"),
+    x_secret_key: str | None = Header(default=None, alias="X-Secret-Key"),
 ) -> dict[str, Any]:
-    """Process SePay bank transaction webhook (`developer.sepay.vn/vi/sepay-webhooks/tich-hop-webhook`)."""
+    """Process SePay bank transfer webhooks and SePay Payment Gateway IPNs."""
     raw_body = await request.body()
+    if _is_gateway_ipn_request(raw_body=raw_body, x_secret_key=x_secret_key):
+        return await _handle_sepay_gateway_ipn(
+            raw_body=raw_body,
+            background_tasks=background_tasks,
+            x_secret_key=x_secret_key,
+        )
+
     if not sepay_client.verify_webhook_request(
         raw_body=raw_body,
         authorization_header=authorization,
@@ -879,57 +1371,11 @@ async def handle_sepay_ipn(
             "sepay_transaction_id": transaction_id,
         }
 
-    target_employees = await _select_target_employees(
-        assigned_employee_id=updated_order.assigned_employee_id,
+    telegram_dispatch_result = await _enqueue_and_dispatch_telegram_alerts(
+        background_tasks=background_tasks,
+        updated_order=updated_order,
         tenant_id=tenant_id,
     )
-    telegram_dispatch_result: dict[str, Any] | None = None
-    if target_employees:
-        items_summary = ", ".join(
-            f"{item.get('quantity', 1)}x {item.get('sku', 'ITEM')}"
-            for item in updated_order.items_json
-        )
-        has_live_bot = bool(
-            telegram_dispatch_client.bot_token
-            and not telegram_dispatch_client.bot_token.startswith("123456789:")
-        )
-        outbox_job_ids: list[str] = []
-        dispatches: list[tuple[UUID, str]] = []
-        for employee in target_employees:
-            job_id = await erp_repository.enqueue_outbox_job(
-                job_type="telegram_dispatch",
-                payload={
-                    "order_id": str(updated_order.id),
-                    "order_code": updated_order.order_code,
-                    "total_amount_vnd": updated_order.total_amount_vnd,
-                    "items_summary": items_summary,
-                    "employee_id": str(employee.id),
-                    "telegram_user_id": employee.telegram_user_id,
-                },
-                tenant_id=tenant_id,
-            )
-            outbox_job_ids.append(str(job_id))
-            dispatches.append((job_id, employee.telegram_user_id))
-
-        background_tasks.add_task(
-            _dispatch_sepay_telegram_alerts,
-            dispatches=dispatches,
-            order_code=updated_order.order_code,
-            total_amount_vnd=updated_order.total_amount_vnd,
-            items_summary=items_summary,
-            tenant_id=tenant_id,
-        )
-
-        primary_employee = target_employees[0]
-        telegram_dispatch_result = {
-            "dispatched": True,
-            "queued": True,
-            "simulated": not has_live_bot,
-            "telegram_user_id": primary_employee.telegram_user_id,
-            "recipient_count": len(target_employees),
-            "order_code": updated_order.order_code,
-            "outbox_job_ids": outbox_job_ids,
-        }
 
     return {
         "success": True,

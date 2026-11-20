@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
@@ -204,6 +205,21 @@ class SePayClient:
     """SePay Webhooks & Dynamic VietQR client aligned with developer.sepay.vn specs."""
 
     ORDER_CODE_PATTERN = re.compile(r"\b(DH\d+)\b", re.IGNORECASE)
+    PG_SIGNED_FIELDS_ORDER: tuple[str, ...] = (
+        "order_amount",
+        "merchant",
+        "currency",
+        "operation",
+        "order_description",
+        "order_invoice_number",
+        "customer_id",
+        "payment_method",
+        "success_url",
+        "error_url",
+        "cancel_url",
+    )
+    PG_CHECKOUT_SANDBOX_URL = "https://pay-sandbox.sepay.vn/v1/checkout/init"
+    PG_CHECKOUT_PROD_URL = "https://pay.sepay.vn/v1/checkout/init"
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -217,6 +233,10 @@ class SePayClient:
         self.qr_template = settings.sepay_qr_template
         self.timestamp_tolerance_seconds = settings.sepay_timestamp_tolerance_seconds
         self.strict_account_check = settings.sepay_strict_account_check
+        self.pg_merchant_id = settings.sepay_pg_merchant_id
+        self.pg_secret_key = settings.sepay_pg_secret_key
+        self.pg_ipn_secret = settings.sepay_pg_ipn_secret
+        self.pg_env = (settings.sepay_pg_env or "sandbox").strip().lower()
         self._order_code_pattern = re.compile(
             rf"\b({re.escape(self.payment_prefix)}\d+)\b",
             re.IGNORECASE,
@@ -374,6 +394,106 @@ class SePayClient:
     def mark_transaction_processed(self, transaction_id: str) -> None:
         """Record a SePay transaction ID as processed for idempotency (`U-15`)."""
         self._processed_transactions.add(transaction_id)
+
+    def sign_checkout_fields(
+        self,
+        fields: dict[str, Any],
+        secret_key: str | None = None,
+    ) -> str:
+        """Sign ordered SePay Payment Gateway checkout fields with HMAC-SHA256 + Base64."""
+        raw_key = self.pg_secret_key if secret_key is None else secret_key
+        key = (raw_key or "").strip()
+        if not key:
+            raise ValueError("SEPAY_PG_SECRET_KEY is not configured")
+
+        parts: list[str] = []
+        for field_name in self.PG_SIGNED_FIELDS_ORDER:
+            if field_name not in fields:
+                continue
+            val = fields[field_name]
+            if val is None or val == "" or val == 0 or val == "0":
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            parts.append(f"{field_name}={val}")
+
+        signed_str = ",".join(parts)
+        digest = hmac.new(
+            key.encode("utf-8"),
+            signed_str.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    def build_checkout_form(
+        self,
+        order_code: str,
+        amount_vnd: int,
+        description: str,
+        customer_id: str | None = None,
+        payment_method: str | None = None,
+        success_url: str | None = None,
+        error_url: str | None = None,
+        cancel_url: str | None = None,
+        lang: str = "vi",
+    ) -> dict[str, Any]:
+        """Build a signed SePay Payment Gateway checkout form payload (fail-closed)."""
+        merchant = (self.pg_merchant_id or "").strip()
+        secret_key = (self.pg_secret_key or "").strip()
+        if not merchant or not secret_key:
+            raise ValueError("SePay Payment Gateway credentials are not configured")
+
+        clean_amount = int(amount_vnd)
+        if clean_amount <= 0:
+            raise ValueError("Order amount must be positive for Payment Gateway checkout")
+
+        raw_fields: dict[str, Any] = {
+            "order_amount": str(clean_amount),
+            "merchant": merchant,
+            "currency": "VND",
+            "operation": "PURCHASE",
+            "order_description": (description or f"Thanh toan don hang {order_code}").strip(),
+            "order_invoice_number": order_code.strip().upper(),
+            "customer_id": customer_id,
+            "payment_method": payment_method,
+            "success_url": success_url,
+            "error_url": error_url,
+            "cancel_url": cancel_url,
+        }
+
+        ordered_fields: dict[str, Any] = {}
+        for field_name in self.PG_SIGNED_FIELDS_ORDER:
+            val = raw_fields.get(field_name)
+            if val is None or val == "" or val == 0 or val == "0":
+                continue
+            if isinstance(val, str):
+                stripped = val.strip()
+                if not stripped or stripped == "0":
+                    continue
+                ordered_fields[field_name] = stripped
+            else:
+                ordered_fields[field_name] = val
+
+        signature = self.sign_checkout_fields(ordered_fields, secret_key=secret_key)
+        ordered_fields["signature"] = signature
+        if lang and str(lang).strip():
+            ordered_fields["lang"] = str(lang).strip()
+
+        env = (self.pg_env or "sandbox").strip().lower()
+        checkout_url = (
+            self.PG_CHECKOUT_PROD_URL if env == "production" else self.PG_CHECKOUT_SANDBOX_URL
+        )
+        return {
+            "checkout_url": checkout_url,
+            "fields": ordered_fields,
+        }
+
+    def verify_pg_ipn_secret(self, x_secret_key: str | None) -> bool:
+        """Verify SePay Payment Gateway IPN `X-Secret-Key` header using constant-time compare (fail-closed)."""
+        expected = (self.pg_ipn_secret or "").strip()
+        if not expected or not x_secret_key:
+            return False
+        return hmac.compare_digest(x_secret_key.strip(), expected)
 
 
 class TelegramDispatchClient:
