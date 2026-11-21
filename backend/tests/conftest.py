@@ -101,7 +101,10 @@ async def reset_postgres_test_state() -> None:
         "tenant_channels",
         "companies",
     )
-    async with AsyncSessionLocal() as session:
+    session_factory = AsyncSessionLocal
+    if session_factory is None:
+        raise RuntimeError("AsyncSessionLocal is not initialized")
+    async with session_factory() as session:
         async with session.begin():
             existing_res = await session.execute(
                 text(
@@ -260,7 +263,8 @@ async def isolate_postgres_test_state() -> AsyncIterator[None]:
     """When `USE_POSTGRES_IN_TESTS=1`, reset and re-seed PostgreSQL tables around each test."""
     try:
         if _use_postgres_in_tests():
-            await engine.dispose()
+            if engine is not None:
+                await engine.dispose()
             await reset_postgres_test_state()
         yield
     finally:
@@ -268,7 +272,8 @@ async def isolate_postgres_test_state() -> AsyncIterator[None]:
             try:
                 await reset_postgres_test_state()
             finally:
-                await engine.dispose()
+                if engine is not None:
+                    await engine.dispose()
 
 
 @pytest.fixture

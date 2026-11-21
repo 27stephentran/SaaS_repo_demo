@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any, get_args, get_origin
+from pathlib import Path
+from typing import Any, cast, get_args, get_origin
 from uuid import UUID, uuid4
 
 import httpx
@@ -58,8 +60,10 @@ def _collect_api_routes() -> list[Any]:
     for route in app.routes:
         if isinstance(route, APIRoute):
             collected.append(route)
-        elif hasattr(route, "effective_route_contexts"):
-            collected.extend(route.effective_route_contexts())
+        else:
+            effective_fn = getattr(route, "effective_route_contexts", None)
+            if callable(effective_fn):
+                collected.extend(cast(Iterable[Any], effective_fn()))
     return collected
 
 
@@ -609,6 +613,7 @@ async def test_v2_retention_cleanup_window_fk_protection_and_backup_abort(
 
 def test_v2_settings_has_no_hardcoded_tenant_localhost_or_dummy_account_defaults(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Verify `Settings` has zero hardcoded `default-tenant`, `localhost`, or dummy account defaults."""
     for var in (
@@ -626,7 +631,8 @@ def test_v2_settings_has_no_hardcoded_tenant_localhost_or_dummy_account_defaults
     ):
         monkeypatch.delenv(var, raising=False)
 
-    clean_settings = Settings(_env_file=None)
+    monkeypatch.chdir(tmp_path)
+    clean_settings = Settings()
     assert clean_settings.default_tenant_id == ""
     assert clean_settings.demo_tenant_id == ""
     assert clean_settings.database_url == ""

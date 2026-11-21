@@ -1142,7 +1142,8 @@ async def handle_meta_webhook(
                     )
                     continue
 
-                commenter = value.get("from") if isinstance(value.get("from"), dict) else {}
+                raw_from = value.get("from")
+                commenter: dict[str, Any] = raw_from if isinstance(raw_from, dict) else {}
                 commenter_id = str(commenter.get("id") or comment_id).strip()
                 commenter_name = str(commenter.get("name") or "Commenter").strip()
 
