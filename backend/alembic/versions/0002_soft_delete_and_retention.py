@@ -68,6 +68,7 @@ def upgrade() -> None:
         ["tenant_id", "is_active", "deactivated_at"],
     )
 
+    op.execute("DROP FUNCTION IF EXISTS match_inventory_embeddings(vector, varchar, integer);")
     op.execute(
         """
         CREATE OR REPLACE FUNCTION match_inventory_embeddings(
@@ -110,7 +111,47 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Revert soft-delete columns and indexes."""
+    """Revert match_inventory_embeddings function, soft-delete columns, and indexes."""
+    op.execute("DROP FUNCTION IF EXISTS match_inventory_embeddings(vector, varchar, integer);")
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION match_inventory_embeddings(
+            query_embedding vector(768),
+            match_tenant_id VARCHAR(64) DEFAULT 'default-tenant',
+            match_limit INTEGER DEFAULT 5
+        )
+        RETURNS TABLE (
+            id UUID,
+            sku VARCHAR(64),
+            name VARCHAR(255),
+            description TEXT,
+            category VARCHAR(128),
+            price_vnd BIGINT,
+            stock_quantity INTEGER,
+            distance DOUBLE PRECISION,
+            similarity_score DOUBLE PRECISION
+        )
+        LANGUAGE sql STABLE
+        AS $$
+            SELECT
+                i.id,
+                i.sku,
+                i.name,
+                i.description,
+                i.category,
+                i.price_vnd,
+                i.stock_quantity,
+                (i.embedding <=> query_embedding) AS distance,
+                (1.0 - (i.embedding <=> query_embedding)) AS similarity_score
+            FROM inventory i
+            WHERE i.tenant_id = match_tenant_id
+              AND i.embedding IS NOT NULL
+            ORDER BY i.embedding <=> query_embedding ASC
+            LIMIT match_limit;
+        $$;
+        """
+    )
+
     op.drop_index("idx_orders_tenant_active", table_name="orders")
     op.drop_column("orders", "deactivated_at")
     op.drop_column("orders", "is_active")
