@@ -20,17 +20,22 @@ from app.services.integrations import meta_graph_client, sepay_client, telegram_
 
 
 @pytest.mark.asyncio
-async def test_health_check() -> None:
-    """Verify `/health` endpoint returns stack metadata."""
+async def test_health_check(auth_headers: dict[str, str]) -> None:
+    """Verify minimal `/health` liveness probe and authenticated `/api/v1/system/health` stack metadata."""
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/health")
         assert response.status_code == 200
         body = response.json()
-        assert body["status"] == "ok"
-        assert body["stack"]["ai_sdk"] == "google-genai"
-        assert body["stack"]["embedding_model"] == "text-embedding-004"
-        assert body["stack"]["meta_api_version"] == "v18.0"
+        assert body == {"status": "ok"}
+
+        sys_response = await client.get("/api/v1/system/health", headers=auth_headers)
+        assert sys_response.status_code == 200
+        sys_body = sys_response.json()
+        assert sys_body["status"] == "ok"
+        assert sys_body["stack"]["ai_sdk"] == "google-genai"
+        assert sys_body["stack"]["embedding_model"] == "text-embedding-004"
+        assert sys_body["stack"]["meta_api_version"] == "v18.0"
 
 
 @pytest.mark.asyncio
@@ -554,7 +559,7 @@ async def test_sepay_webhook_ignores_paid_and_cancelled_orders(
         assert paid_dup_data["ignored"] is True
         assert paid_dup_data["reason"] == "order_already_paid"
         assert paid_dup_data["order_status"] == "PAID"
-        assert "telegram_dispatch" not in paid_dup_data
+        assert paid_dup_data["telegram_dispatch"] is None
 
         stored_paid = erp_repository.get_order_by_code("DH9002")
         assert stored_paid is not None
@@ -583,7 +588,7 @@ async def test_sepay_webhook_ignores_paid_and_cancelled_orders(
         assert cancelled_data["ignored"] is True
         assert cancelled_data["reason"] == "order_cancelled"
         assert cancelled_data["order_status"] == "CANCELLED"
-        assert "telegram_dispatch" not in cancelled_data
+        assert cancelled_data["telegram_dispatch"] is None
 
         stored_cancelled = erp_repository.get_order_by_code("DH9003")
         assert stored_cancelled is not None

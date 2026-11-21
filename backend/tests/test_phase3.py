@@ -34,8 +34,9 @@ FRONTEND_DIR = REPO_ROOT / "frontend"
 @pytest.mark.asyncio
 async def test_health_probe_fallback_mode_in_dev(
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
-    """`GET /health` returns 200 with `database: "fallback"` when Postgres is inactive in non-prod."""
+    """`GET /health` returns minimal `{status: ok}`; `/api/v1/system/health` returns `database: fallback`."""
     monkeypatch.setenv("APP_ENV", "development")
 
     async def _pg_inactive() -> bool:
@@ -47,7 +48,11 @@ async def test_health_probe_fallback_mode_in_dev(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health")
         assert resp.status_code == 200
-        body = resp.json()
+        assert resp.json() == {"status": "ok"}
+
+        sys_resp = await client.get("/api/v1/system/health", headers=auth_headers)
+        assert sys_resp.status_code == 200
+        body = sys_resp.json()
         assert body["status"] == "ok"
         assert body["database"] == "fallback"
         assert body["stack"]["database"] == "supabase-postgresql-pgvector"
@@ -56,20 +61,29 @@ async def test_health_probe_fallback_mode_in_dev(
 @pytest.mark.asyncio
 async def test_health_probe_postgres_active_returns_200_postgres(
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
-    """`GET /health` returns 200 with `database: "postgres"` when Postgres is reachable."""
+    """`GET /health` returns 200 `{status: ok}` and `/api/v1/system/health` returns `database: postgres`."""
     monkeypatch.setenv("APP_ENV", "production")
 
     async def _pg_active() -> bool:
         return True
 
+    async def _not_revoked(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
     monkeypatch.setattr(erp_repository, "is_postgres_active", _pg_active)
+    monkeypatch.setattr(erp_repository, "is_token_revoked", _not_revoked)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health")
         assert resp.status_code == 200
-        body = resp.json()
+        assert resp.json() == {"status": "ok"}
+
+        sys_resp = await client.get("/api/v1/system/health", headers=auth_headers)
+        assert sys_resp.status_code == 200
+        body = sys_resp.json()
         assert body["status"] == "ok"
         assert body["database"] == "postgres"
 
@@ -77,8 +91,9 @@ async def test_health_probe_postgres_active_returns_200_postgres(
 @pytest.mark.asyncio
 async def test_health_probe_returns_503_in_production_when_postgres_unavailable_or_raises(
     monkeypatch: pytest.MonkeyPatch,
+    auth_headers: dict[str, str],
 ) -> None:
-    """`GET /health` returns 503 when `APP_ENV=production` and Postgres is unreachable or raises."""
+    """`GET /health` and `/api/v1/system/health` return 503 in production when Postgres is unreachable."""
     monkeypatch.setenv("APP_ENV", "production")
 
     async def _pg_false() -> bool:
@@ -87,19 +102,31 @@ async def test_health_probe_returns_503_in_production_when_postgres_unavailable_
     async def _pg_raises() -> bool:
         raise RuntimeError("PostgreSQL database unavailable in production mode")
 
+    async def _not_revoked(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         monkeypatch.setattr(erp_repository, "is_postgres_active", _pg_false)
         resp_false = await client.get("/health")
         assert resp_false.status_code == 503
-        body_false = resp_false.json()
+        assert resp_false.json() == {"status": "unhealthy"}
+
+        sys_false = await client.get("/api/v1/system/health", headers=auth_headers)
+        assert sys_false.status_code == 503
+        body_false = sys_false.json()
         assert body_false["status"] == "unhealthy"
         assert body_false["database"] == "unavailable"
 
         monkeypatch.setattr(erp_repository, "is_postgres_active", _pg_raises)
+        monkeypatch.setattr(erp_repository, "is_token_revoked", _not_revoked)
         resp_raises = await client.get("/health")
         assert resp_raises.status_code == 503
-        body_raises = resp_raises.json()
+        assert resp_raises.json() == {"status": "unhealthy"}
+
+        sys_raises = await client.get("/api/v1/system/health", headers=auth_headers)
+        assert sys_raises.status_code == 503
+        body_raises = sys_raises.json()
         assert body_raises["status"] == "unhealthy"
         assert body_raises["database"] == "unavailable"
 

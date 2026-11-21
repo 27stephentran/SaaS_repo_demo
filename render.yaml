@@ -10,6 +10,12 @@ services:
     envVars:
       - key: APP_ENV
         value: production
+      - key: DEFAULT_TENANT_ID
+        sync: false
+      - key: DEMO_TENANT_ID
+        sync: false
+      - key: SOFT_DELETE_RETENTION_DAYS
+        value: "365"
       - key: DATABASE_URL
         sync: false
       - key: API_TOKEN_SECRET
@@ -57,6 +63,8 @@ services:
       - key: SEPAY_PG_ENV
         value: sandbox
       - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DEMO_TELEGRAM_CHAT_ID
         sync: false
       - key: CORS_ORIGINS
         value: '["https://saa-s-repo-demo.vercel.app","https://saas-repo-demo.onrender.com"]'

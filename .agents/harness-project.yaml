@@ -1,0 +1,76 @@
+schema_version: 0.2.5
+project:
+  name: SaaS_repo_demo
+  type: fullstack_monorepo
+  root_path: .
+  artifacts_dir: .harness/artifacts
+  languages:
+  - python
+  - typescript
+  - javascript
+  - sql
+  frameworks:
+  - fastapi
+  - nuxt
+  - vue
+platform:
+  primary_ide: antigravity
+  adapter: antigravity
+  mode: orchestrated
+paths:
+  source_dirs:
+  - backend/app
+  - backend/alembic
+  - backend/sql
+  - frontend/pages
+  - frontend/layouts
+  - frontend/components
+  - frontend/middleware
+  - frontend/stores
+  - frontend/types
+  - frontend/server
+  test_dirs:
+  - backend/tests
+  - frontend/tests
+stack:
+  primary:
+    language: python
+commands:
+  test: cd backend && .venv/bin/python -m pytest -q && cd ../frontend && npm test
+  lint: cd backend && .venv/bin/ruff check app/ tests/ && cd ../frontend && npm run typecheck
+  format: cd backend && .venv/bin/ruff format app/ tests/
+  build: cd frontend && npm run build
+agents:
+  core_roles:
+  - orchestrator
+  - planner
+  - architect
+  - implementer
+  - qa
+  - security
+  - reviewer
+  enabled_packs:
+  - python
+  - typescript-react
+  - database
+  role_aliases: {}
+cost_budget:
+  currency: USD
+  per_task_max_usd: 1.0
+  per_workflow_max_usd: 5.0
+  monthly_project_max_usd: 50.0
+  warning_threshold_ratio: 0.8
+security:
+  sensitive_paths:
+  - '**/auth/**'
+  - '**/.env*'
+  invariants: []
+preserved_user_files:
+- .agents/AGENTS.md
+- AGENTS.md
+approval:
+  before_integrate: false
+  before_commit: true
+  before_push: true
+  before_deployment: true
+  before_budget_exceed: true

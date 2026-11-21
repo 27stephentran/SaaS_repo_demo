@@ -43,6 +43,10 @@ services:
         required: false
     environment:
       - APP_ENV=${APP_ENV:-development}
+      - DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-}
+      - DEMO_TENANT_ID=${DEMO_TENANT_ID:-}
+      - SOFT_DELETE_RETENTION_DAYS=${SOFT_DELETE_RETENTION_DAYS:-365}
+      - DEMO_TELEGRAM_CHAT_ID=${DEMO_TELEGRAM_CHAT_ID:-}
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/saas_erp_mvp}
       - API_TOKEN_SECRET=${API_TOKEN_SECRET:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost:3000","http://127.0.0.1:3000"]}
