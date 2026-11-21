@@ -1,5 +1,6 @@
 # Personal AI Engineering Harness (never track in git)
 .harness/
+.vscode/
 
 # Environment variables & secrets
 .env
