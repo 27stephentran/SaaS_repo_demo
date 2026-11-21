@@ -2,14 +2,32 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type {
   AuthUser,
+  BankCatalogResponse,
+  ChangePasswordPayload,
+  ChannelConversation,
+  ChannelMessage,
+  Company,
+  CompanyBankUpdatePayload,
+  CompanyCreatePayload,
   Customer,
   Employee,
   ErpTelemetryMetrics,
+  InventoryCreatePayload,
   InventoryItem,
   LoginCredentials,
+  ManagerCreatePayload,
+  ManagerCreateResponse,
+  ManagerDashboardSummary,
   Order,
   OrderCreatePayload,
   OrderStatus,
+  RestoreResponse,
+  SignupCredentials,
+  SoftDeleteResponse,
+  StaffCreatePayload,
+  StaffCreateResponse,
+  StaffMemberSummary,
+  TelegramDispatchResponse,
   WebhookEventLog,
   WebhookEventStatus,
   WebhookLogResponse,
@@ -28,213 +46,6 @@ export function isValidOrderTransition(from: OrderStatus, to: OrderStatus): bool
   return ALLOWED_ORDER_TRANSITIONS[from].includes(to)
 }
 
-const INITIAL_INVENTORY: InventoryItem[] = [
-  {
-    id: '11111111-1111-4111-8111-111111111101',
-    tenant_id: 'default-tenant',
-    sku: 'COFFEE-ARABICA-1KG',
-    name: 'Cau Dat Arabica Specialty Beans (1kg)',
-    description: 'Washed process high-altitude Lam Dong Arabica coffee beans with floral and citrus notes.',
-    category: 'Coffee Beans',
-    price_vnd: 480000,
-    stock_quantity: 42,
-    has_embedding: true,
-    similarity_score: 0.96,
-    similarity_distance: 0.08,
-    updated_at: '2026-11-18T07:30:00Z'
-  },
-  {
-    id: '11111111-1111-4111-8111-111111111102',
-    tenant_id: 'default-tenant',
-    sku: 'MATCHA-UJI-CEREMONIAL-100G',
-    name: 'Uji Ceremonial Grade Matcha Tin (100g)',
-    description: 'First-harvest stone-ground Uji green tea powder for usucha and premium lattes.',
-    category: 'Tea & Matcha',
-    price_vnd: 650000,
-    stock_quantity: 19,
-    has_embedding: true,
-    similarity_score: 0.91,
-    similarity_distance: 0.18,
-    updated_at: '2026-11-18T07:45:00Z'
-  },
-  {
-    id: '11111111-1111-4111-8111-111111111103',
-    tenant_id: 'default-tenant',
-    sku: 'EQUIP-V60-COPPER-02',
-    name: 'Hario V60 Copper Dripper Size 02',
-    description: 'High thermal conductivity copper pour-over coffee dripper for specialty extraction.',
-    category: 'Brewing Gear',
-    price_vnd: 1850000,
-    stock_quantity: 7,
-    has_embedding: true,
-    similarity_score: 0.88,
-    similarity_distance: 0.24,
-    updated_at: '2026-11-18T08:00:00Z'
-  },
-  {
-    id: '11111111-1111-4111-8111-111111111104',
-    tenant_id: 'default-tenant',
-    sku: 'SYRUP-MONIN-VANILLA-700ML',
-    name: 'Monin Madagascar Vanilla Syrup (700ml)',
-    description: 'Pure cane sugar culinary vanilla syrup for specialty coffee beverages.',
-    category: 'Barista Syrups',
-    price_vnd: 245000,
-    stock_quantity: 64,
-    has_embedding: true,
-    similarity_score: 0.84,
-    similarity_distance: 0.32,
-    updated_at: '2026-11-18T08:10:00Z'
-  }
-]
-
-const INITIAL_CUSTOMERS: Customer[] = [
-  {
-    id: '22222222-2222-4222-8222-222222222201',
-    tenant_id: 'default-tenant',
-    meta_psid: 'PSID_992814',
-    full_name: 'Pham Gia Huy (FB Messenger)',
-    phone: '+84901234501',
-    created_at: '2026-11-18T07:00:00Z'
-  },
-  {
-    id: '22222222-2222-4222-8222-222222222202',
-    tenant_id: 'default-tenant',
-    meta_psid: 'PSID_884120',
-    full_name: 'Doan Thu Ha (Instagram DM)',
-    phone: '+84901234502',
-    created_at: '2026-11-18T07:10:00Z'
-  },
-  {
-    id: '22222222-2222-4222-8222-222222222203',
-    tenant_id: 'default-tenant',
-    meta_psid: 'PSID_773190',
-    full_name: 'Vu Hoang Nam (FB Messenger)',
-    phone: '+84901234503',
-    created_at: '2026-11-18T07:20:00Z'
-  }
-]
-
-const INITIAL_EMPLOYEES: Employee[] = [
-  {
-    id: '33333333-3333-4333-8333-333333333301',
-    tenant_id: 'default-tenant',
-    full_name: 'Minh Tran',
-    role: 'Lead Fulfillment Specialist',
-    telegram_user_id: 'tg_849102938',
-    is_active: true
-  },
-  {
-    id: '33333333-3333-4333-8333-333333333302',
-    tenant_id: 'default-tenant',
-    full_name: 'Linh Nguyen',
-    role: 'Warehouse & VietQR Reconciliation',
-    telegram_user_id: 'tg_849556120',
-    is_active: true
-  },
-  {
-    id: '33333333-3333-4333-8333-333333333303',
-    tenant_id: 'default-tenant',
-    full_name: 'Khoa Le',
-    role: 'Express Dispatch Courier',
-    telegram_user_id: 'tg_849883412',
-    is_active: true
-  }
-]
-
-const INITIAL_ORDERS: Order[] = [
-  {
-    id: '44444444-4444-4444-8444-444444444401',
-    tenant_id: 'default-tenant',
-    order_code: 'ORD-2026-8841',
-    customer_id: '22222222-2222-4222-8222-222222222201',
-    customer_name: 'Pham Gia Huy (FB Messenger)',
-    items: [
-      {
-        sku: 'COFFEE-ARABICA-1KG',
-        name: 'Cau Dat Arabica Specialty Beans (1kg)',
-        quantity: 2,
-        unit_price_vnd: 480000
-      }
-    ],
-    total_amount_vnd: 960000,
-    status: 'PENDING_PAYMENT',
-    sepay_reference: 'SEPAY8841',
-    sepay_transaction_id: null,
-    vietqr_url: 'https://qr.sepay.vn/img?bank=MBBank&acc=0000123456789&amount=960000&des=SEPAY8841',
-    sepay_qr_url: 'https://qr.sepay.vn/img?bank=MBBank&acc=0000123456789&amount=960000&des=SEPAY8841',
-    created_at: '2026-11-18T08:12:00Z'
-  },
-  {
-    id: '44444444-4444-4444-8444-444444444402',
-    tenant_id: 'default-tenant',
-    order_code: 'ORD-2026-8840',
-    customer_id: '22222222-2222-4222-8222-222222222202',
-    customer_name: 'Doan Thu Ha (Instagram DM)',
-    items: [
-      {
-        sku: 'MATCHA-UJI-CEREMONIAL-100G',
-        name: 'Uji Ceremonial Grade Matcha Tin (100g)',
-        quantity: 1,
-        unit_price_vnd: 650000
-      },
-      {
-        sku: 'SYRUP-MONIN-VANILLA-700ML',
-        name: 'Monin Madagascar Vanilla Syrup (700ml)',
-        quantity: 1,
-        unit_price_vnd: 245000
-      }
-    ],
-    total_amount_vnd: 895000,
-    status: 'PAID',
-    sepay_reference: 'SEPAY8840',
-    sepay_transaction_id: 'SEPAY-TXN-8840',
-    assigned_employee_id: '33333333-3333-4333-8333-333333333301',
-    created_at: '2026-11-18T08:05:00Z'
-  },
-  {
-    id: '44444444-4444-4444-8444-444444444403',
-    tenant_id: 'default-tenant',
-    order_code: 'ORD-2026-8839',
-    customer_id: '22222222-2222-4222-8222-222222222203',
-    customer_name: 'Vu Hoang Nam (FB Messenger)',
-    items: [
-      {
-        sku: 'EQUIP-V60-COPPER-02',
-        name: 'Hario V60 Copper Dripper Size 02',
-        quantity: 1,
-        unit_price_vnd: 1850000
-      }
-    ],
-    total_amount_vnd: 1850000,
-    status: 'FULFILLING',
-    sepay_reference: 'SEPAY8839',
-    sepay_transaction_id: 'SEPAY-TXN-8839',
-    assigned_employee_id: '33333333-3333-4333-8333-333333333302',
-    created_at: '2026-11-18T07:40:00Z'
-  },
-  {
-    id: '44444444-4444-4444-8444-444444444404',
-    tenant_id: 'default-tenant',
-    order_code: 'ORD-2026-8838',
-    customer_id: '22222222-2222-4222-8222-222222222204',
-    customer_name: 'Nguyen Minh Chau (FB Messenger)',
-    items: [
-      {
-        sku: 'COFFEE-ARABICA-1KG',
-        name: 'Cau Dat Arabica Specialty Beans (1kg)',
-        quantity: 1,
-        unit_price_vnd: 480000
-      }
-    ],
-    total_amount_vnd: 480000,
-    status: 'COMPLETED',
-    sepay_reference: 'SEPAY8838',
-    sepay_transaction_id: 'SEPAY-TXN-8838',
-    assigned_employee_id: '33333333-3333-4333-8333-333333333303',
-    created_at: '2026-11-18T06:55:00Z'
-  }
-]
-
 function extractHttpStatus(err: unknown): number | undefined {
   if (!err || typeof err !== 'object') return undefined
   const record = err as { statusCode?: number; status?: number; response?: { status?: number } }
@@ -244,7 +55,7 @@ function extractHttpStatus(err: unknown): number | undefined {
 function extractErrorMessage(err: unknown, fallback: string): string {
   if (!err || typeof err !== 'object') return fallback
   const record = err as {
-    data?: { detail?: unknown; message?: unknown }
+    data?: { detail?: unknown; message?: unknown; statusMessage?: unknown }
     statusMessage?: unknown
     message?: unknown
   }
@@ -253,6 +64,9 @@ function extractErrorMessage(err: unknown, fallback: string): string {
   }
   if (typeof record.data?.message === 'string' && record.data.message.trim()) {
     return record.data.message
+  }
+  if (typeof record.data?.statusMessage === 'string' && record.data.statusMessage.trim()) {
+    return record.data.statusMessage
   }
   if (typeof record.statusMessage === 'string' && record.statusMessage.trim()) {
     return record.statusMessage
@@ -274,7 +88,17 @@ function normalizeInventoryItem(item: InventoryItem): InventoryItem {
   return {
     ...item,
     category: item.category || 'General Merchandise',
+    is_active: item.is_active ?? true,
+    deactivated_at: item.deactivated_at ?? null,
     similarity_score: computedScore
+  }
+}
+
+function normalizeCustomer(customer: Customer): Customer {
+  return {
+    ...customer,
+    is_active: customer.is_active ?? true,
+    deactivated_at: customer.deactivated_at ?? null
   }
 }
 
@@ -295,7 +119,9 @@ function normalizeOrder(order: Order): Order {
     items_json: items,
     vietqr_url: vietqrUrl,
     sepay_qr_url: vietqrUrl,
-    sepay_reference: sepayReference
+    sepay_reference: sepayReference,
+    is_active: order.is_active ?? true,
+    deactivated_at: order.deactivated_at ?? null
   }
 }
 
@@ -321,7 +147,8 @@ function normalizeWebhookLog(log: WebhookLogResponse): WebhookEventLog {
       event_type: log.event_type,
       summary: log.summary,
       status: normalizeWebhookStatus(log.status),
-      timestamp: log.timestamp
+      timestamp: log.timestamp,
+      raw_payload: log.raw_payload
     }
   }
 
@@ -336,32 +163,101 @@ function normalizeWebhookLog(log: WebhookLogResponse): WebhookEventLog {
     event_type: log.event_type || (log.transfer_type === 'in' ? 'transaction.credit_verified' : `transaction.${log.transfer_type || 'webhook'}`),
     summary: log.summary || `SePay IPN ${txId}: ${amount.toLocaleString('vi-VN')} VND${orderSuffix}${refSuffix}`,
     status: normalizeWebhookStatus(log.processing_status || log.status),
-    timestamp: log.created_at || log.timestamp || new Date().toISOString()
+    timestamp: log.created_at || log.timestamp || new Date().toISOString(),
+    raw_payload: log.raw_payload
   }
 }
 
 export const useErpStore = defineStore('erp', () => {
   const currentUser = ref<AuthUser | null>(null)
   const isAuthenticated = computed<boolean>(() => Boolean(currentUser.value?.authenticated))
+  const isLiveAuthenticated = computed<boolean>(
+    () => Boolean(currentUser.value?.authenticated && currentUser.value?.permission_group === 'live_api')
+  )
+  const userRole = computed<string>(() => (currentUser.value?.role || '').toLowerCase())
+  const isAdmin = computed<boolean>(() => isLiveAuthenticated.value && userRole.value === 'admin')
+  const isManager = computed<boolean>(() => isLiveAuthenticated.value && userRole.value === 'manager')
+  const isStaff = computed<boolean>(() => isLiveAuthenticated.value && userRole.value === 'staff')
+  const mustChangePassword = computed<boolean>(() => Boolean(currentUser.value?.must_change_password))
+
   const requiresAuth = ref<boolean>(false)
   const isAuthenticating = ref<boolean>(false)
   const authError = ref<string | null>(null)
 
-  const inventory = ref<InventoryItem[]>([...INITIAL_INVENTORY])
-  const orders = ref<Order[]>([...INITIAL_ORDERS])
-  const customers = ref<Customer[]>([...INITIAL_CUSTOMERS])
-  const employees = ref<Employee[]>([...INITIAL_EMPLOYEES])
+  const selectedCompanyId = ref<string | null>(null)
+  const companies = ref<Company[]>([])
+  const bankCatalog = ref<BankCatalogResponse>({
+    banks: [],
+    sepay_linked_accounts: [],
+    sepay_api_configured: false,
+    bankhub_configured: false
+  })
+  const staffMembers = ref<StaffMemberSummary[]>([])
+  const myWorkOrders = ref<Order[]>([])
+  const managerDashboard = ref<ManagerDashboardSummary | null>(null)
+  const chats = ref<ChannelConversation[]>([])
+  const activeChatMessages = ref<ChannelMessage[]>([])
+
+  const inventory = ref<InventoryItem[]>([])
+  const orders = ref<Order[]>([])
+  const customers = ref<Customer[]>([])
+  const employees = ref<Employee[]>([])
   const webhookFeed = ref<WebhookEventLog[]>([])
   const metrics = ref<ErpTelemetryMetrics | null>(null)
 
+  const isLoadingCompanies = ref<boolean>(false)
+  const isLoadingBanks = ref<boolean>(false)
+  const isCreatingCompany = ref<boolean>(false)
+  const isLoadingStaff = ref<boolean>(false)
+  const isCreatingStaff = ref<boolean>(false)
+  const isLoadingMyWork = ref<boolean>(false)
+  const isLoadingDashboard = ref<boolean>(false)
+  const isLoadingChats = ref<boolean>(false)
+  const isLoadingChatMessages = ref<boolean>(false)
+  const isSendingChatReply = ref<boolean>(false)
+
   const isLoadingInventory = ref<boolean>(false)
   const isLoadingOrders = ref<boolean>(false)
-  const updatingOrderIds = ref<Record<string, boolean>>({})
-  const isCreatingOrder = ref<boolean>(false)
+  const isLoadingCustomers = ref<boolean>(false)
+  const isLoadingEmployees = ref<boolean>(false)
   const isLoadingWebhooks = ref<boolean>(false)
+  const isCreatingOrder = ref<boolean>(false)
+  const isCreatingInventory = ref<boolean>(false)
+  const updatingOrderIds = ref<Record<string, boolean>>({})
+  const mutatingInventoryIds = ref<Record<string, boolean>>({})
+  const mutatingCustomerIds = ref<Record<string, boolean>>({})
+  const notifyingOrderIds = ref<Record<string, boolean>>({})
+
+  const companiesError = ref<string | null>(null)
+  const staffError = ref<string | null>(null)
+  const myWorkError = ref<string | null>(null)
+  const dashboardError = ref<string | null>(null)
+  const chatsError = ref<string | null>(null)
+
+  const inventoryError = ref<string | null>(null)
+  const ordersError = ref<string | null>(null)
+  const customersError = ref<string | null>(null)
   const webhookError = ref<string | null>(null)
   const lastSearchQuery = ref<string>('')
-  const avgRagLatencyMs = ref<number>(340)
+  const avgRagLatencyMs = ref<number>(0)
+
+  const activeCompanyId = computed<string | null>(() => {
+    if (isAdmin.value) {
+      return selectedCompanyId.value
+    }
+    return currentUser.value?.company_id ?? null
+  })
+
+  const activeCompanyName = computed<string | null>(() => {
+    const id = activeCompanyId.value
+    if (!id) return null
+    const matched = companies.value.find((c) => c.id === id)
+    if (matched) return matched.name
+    if (managerDashboard.value?.company_id === id && managerDashboard.value.company_name) {
+      return managerDashboard.value.company_name
+    }
+    return id.slice(0, 8)
+  })
 
   const ordersByStatus = computed<Record<OrderStatus, Order[]>>(() => {
     const grouped: Record<OrderStatus, Order[]> = {
@@ -377,6 +273,49 @@ export const useErpStore = defineStore('erp', () => {
     return grouped
   })
 
+  function buildCompanyQuery(extra: Record<string, string | boolean | undefined> = {}): string {
+    const params = new URLSearchParams()
+    for (const [key, val] of Object.entries(extra)) {
+      if (val !== undefined && val !== false && val !== '') {
+        params.set(key, String(val))
+      }
+    }
+    if (isAdmin.value && selectedCompanyId.value) {
+      params.set('company_id', selectedCompanyId.value)
+    }
+    const qs = params.toString()
+    return qs ? `?${qs}` : ''
+  }
+
+  function setSelectedCompanyId(companyId: string | null): void {
+    selectedCompanyId.value = companyId || null
+  }
+
+  function clearWorkspaceState(): void {
+    selectedCompanyId.value = null
+    companies.value = []
+    staffMembers.value = []
+    myWorkOrders.value = []
+    managerDashboard.value = null
+    chats.value = []
+    activeChatMessages.value = []
+    inventory.value = []
+    orders.value = []
+    customers.value = []
+    employees.value = []
+    webhookFeed.value = []
+    metrics.value = null
+    companiesError.value = null
+    staffError.value = null
+    myWorkError.value = null
+    dashboardError.value = null
+    chatsError.value = null
+    inventoryError.value = null
+    ordersError.value = null
+    customersError.value = null
+    webhookError.value = null
+  }
+
   function markUnauthorizedIf401(err: unknown): boolean {
     if (extractHttpStatus(err) === 401) {
       currentUser.value = null
@@ -386,14 +325,16 @@ export const useErpStore = defineStore('erp', () => {
     return false
   }
 
-  async function fetchSession(): Promise<AuthUser | null> {
+  async function fetchSession(requestHeaders?: Record<string, string>): Promise<AuthUser | null> {
     try {
-      const data = await $fetch<AuthUser>('/api/auth/me')
+      const data = await $fetch<AuthUser>('/api/auth/me', {
+        ...(requestHeaders ? { headers: requestHeaders } : {})
+      })
       currentUser.value = {
         ...data,
         authenticated: true
       }
-      requiresAuth.value = false
+      requiresAuth.value = data.permission_group !== 'live_api'
       return currentUser.value
     } catch {
       currentUser.value = null
@@ -405,12 +346,22 @@ export const useErpStore = defineStore('erp', () => {
     isAuthenticating.value = true
     authError.value = null
     try {
+      const tenantId = credentials.tenant_id.trim()
+      if (!tenantId) {
+        throw new Error('Tenant ID is required')
+      }
+      const identifierVal = credentials.identifier?.trim()
+      const emailVal = credentials.email?.trim()
+      if (!identifierVal && !emailVal) {
+        throw new Error('Username or email is required')
+      }
       const data = await $fetch<AuthUser>('/api/auth/login', {
         method: 'POST',
         body: {
-          email: credentials.email.trim(),
+          ...(identifierVal ? { identifier: identifierVal } : {}),
+          ...(emailVal ? { email: emailVal } : {}),
           password: credentials.password,
-          tenant_id: credentials.tenant_id.trim() || 'default-tenant'
+          tenant_id: tenantId
         }
       })
       currentUser.value = {
@@ -427,6 +378,61 @@ export const useErpStore = defineStore('erp', () => {
     }
   }
 
+  async function changePassword(payload: ChangePasswordPayload): Promise<AuthUser> {
+    isAuthenticating.value = true
+    authError.value = null
+    try {
+      const data = await $fetch<AuthUser>('/api/auth/change-password', {
+        method: 'POST',
+        body: {
+          current_password: payload.current_password,
+          new_password: payload.new_password
+        }
+      })
+      currentUser.value = {
+        ...data,
+        authenticated: true,
+        must_change_password: false
+      }
+      return currentUser.value
+    } catch (err) {
+      authError.value = extractErrorMessage(err, 'Unable to update password')
+      throw err
+    } finally {
+      isAuthenticating.value = false
+    }
+  }
+
+  async function signup(credentials: SignupCredentials): Promise<AuthUser> {
+    isAuthenticating.value = true
+    authError.value = null
+    try {
+      const tenantId = credentials.tenant_id.trim()
+      if (!tenantId) {
+        throw new Error('Tenant ID is required')
+      }
+      const data = await $fetch<AuthUser>('/api/auth/signup', {
+        method: 'POST',
+        body: {
+          email: credentials.email.trim(),
+          password: credentials.password,
+          tenant_id: tenantId
+        }
+      })
+      currentUser.value = {
+        ...data,
+        authenticated: true
+      }
+      requiresAuth.value = false
+      return currentUser.value
+    } catch (err) {
+      authError.value = extractErrorMessage(err, 'Unable to create operator account')
+      throw err
+    } finally {
+      isAuthenticating.value = false
+    }
+  }
+
   async function logout(): Promise<void> {
     try {
       await $fetch('/api/auth/logout', { method: 'POST' })
@@ -435,19 +441,119 @@ export const useErpStore = defineStore('erp', () => {
     } finally {
       currentUser.value = null
       requiresAuth.value = true
+      clearWorkspaceState()
     }
   }
 
-  async function fetchInventory(): Promise<void> {
+  async function fetchInventory(includeInactive = false): Promise<void> {
     isLoadingInventory.value = true
+    inventoryError.value = null
     try {
-      const data = await $fetch<InventoryItem[]>('/api/erp/inventory')
-      if (Array.isArray(data) && data.length > 0) {
-        inventory.value = data.map(normalizeInventoryItem)
+      const query = buildCompanyQuery({ include_inactive: includeInactive || undefined })
+      const data = await $fetch<InventoryItem[]>(`/api/erp/inventory${query}`)
+      inventory.value = Array.isArray(data) ? data.map(normalizeInventoryItem) : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        inventoryError.value = extractErrorMessage(err, 'Unable to load inventory catalog')
       }
+    } finally {
+      isLoadingInventory.value = false
+    }
+  }
+
+  async function createInventoryItem(payload: InventoryCreatePayload): Promise<InventoryItem> {
+    isCreatingInventory.value = true
+    try {
+      const effectiveCompanyId = payload.company_id || (isAdmin.value ? selectedCompanyId.value : null)
+      const created = await $fetch<InventoryItem>('/api/erp/inventory', {
+        method: 'POST',
+        body: {
+          ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}),
+          sku: payload.sku.trim(),
+          name: payload.name.trim(),
+          description: payload.description.trim(),
+          category: payload.category?.trim() || 'General Merchandise',
+          price_vnd: Math.max(0, Math.floor(Number(payload.price_vnd))),
+          stock_quantity: Math.max(0, Math.floor(Number(payload.stock_quantity)))
+        }
+      })
+      const normalized = normalizeInventoryItem(created)
+      inventory.value.unshift(normalized)
+      return normalized
     } catch (err) {
       markUnauthorizedIf401(err)
-      // Keep resilient local seed data when unauthenticated/offline in preview mode
+      throw err
+    } finally {
+      isCreatingInventory.value = false
+    }
+  }
+
+  async function softDeleteInventory(itemId: string): Promise<SoftDeleteResponse> {
+    mutatingInventoryIds.value[itemId] = true
+    try {
+      const result = await $fetch<SoftDeleteResponse>(`/api/erp/inventory/${itemId}`, {
+        method: 'DELETE'
+      })
+      const target = inventory.value.find((item) => item.id === itemId)
+      if (target) {
+        target.is_active = false
+        target.deactivated_at = result.deactivated_at
+      }
+      return result
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      delete mutatingInventoryIds.value[itemId]
+    }
+  }
+
+  async function restoreInventory(itemId: string): Promise<RestoreResponse> {
+    mutatingInventoryIds.value[itemId] = true
+    try {
+      const result = await $fetch<RestoreResponse>(`/api/erp/inventory/${itemId}/restore`, {
+        method: 'POST'
+      })
+      const target = inventory.value.find((item) => item.id === itemId)
+      if (target) {
+        target.is_active = true
+        target.deactivated_at = null
+      }
+      return result
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      delete mutatingInventoryIds.value[itemId]
+    }
+  }
+
+  async function searchInventorySemantic(query: string, includeInactive = false): Promise<void> {
+    const trimmed = query.trim()
+    lastSearchQuery.value = trimmed
+    if (!trimmed) {
+      await fetchInventory(includeInactive)
+      return
+    }
+
+    isLoadingInventory.value = true
+    inventoryError.value = null
+    try {
+      const data = await $fetch<InventoryItem[]>('/api/erp/inventory/search', {
+        method: 'POST',
+        body: {
+          query: trimmed,
+          ...(currentUser.value?.tenant_id ? { tenant_id: currentUser.value.tenant_id } : {}),
+          ...(isAdmin.value && selectedCompanyId.value ? { company_id: selectedCompanyId.value } : {}),
+          limit: 10,
+          include_inactive: includeInactive
+        }
+      })
+      inventory.value = Array.isArray(data) ? data.map(normalizeInventoryItem) : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        inventoryError.value = extractErrorMessage(err, 'Semantic inventory search failed')
+      }
     } finally {
       isLoadingInventory.value = false
     }
@@ -455,53 +561,120 @@ export const useErpStore = defineStore('erp', () => {
 
   async function fetchOrders(): Promise<void> {
     isLoadingOrders.value = true
+    ordersError.value = null
     try {
-      const data = await $fetch<Order[]>('/api/erp/orders')
-      if (Array.isArray(data)) {
-        orders.value = data.map(normalizeOrder)
-      }
+      const query = buildCompanyQuery()
+      const data = await $fetch<Order[]>(`/api/erp/orders${query}`)
+      orders.value = Array.isArray(data) ? data.map(normalizeOrder) : []
     } catch (err) {
-      markUnauthorizedIf401(err)
-      // Keep local seed orders if unauthenticated/offline
+      if (!markUnauthorizedIf401(err)) {
+        ordersError.value = extractErrorMessage(err, 'Unable to load orders')
+      }
     } finally {
       isLoadingOrders.value = false
     }
   }
 
-  async function fetchCustomers(): Promise<void> {
+  async function fetchCustomers(includeInactive = false): Promise<void> {
+    isLoadingCustomers.value = true
+    customersError.value = null
     try {
-      const data = await $fetch<Customer[]>('/api/erp/customers')
-      if (Array.isArray(data) && data.length > 0) {
-        customers.value = data
-      }
+      const query = buildCompanyQuery({ include_inactive: includeInactive || undefined })
+      const data = await $fetch<Customer[]>(`/api/erp/customers${query}`)
+      customers.value = Array.isArray(data) ? data.map(normalizeCustomer) : []
     } catch (err) {
-      markUnauthorizedIf401(err)
-      // Keep local seed customers if unauthenticated/offline
+      if (!markUnauthorizedIf401(err)) {
+        customersError.value = extractErrorMessage(err, 'Unable to load customer directory')
+      }
+    } finally {
+      isLoadingCustomers.value = false
     }
   }
 
-  async function fetchEmployees(): Promise<void> {
+  async function softDeleteCustomer(customerId: string): Promise<SoftDeleteResponse> {
+    mutatingCustomerIds.value[customerId] = true
     try {
-      const data = await $fetch<Employee[]>('/api/erp/employees')
-      if (Array.isArray(data) && data.length > 0) {
-        employees.value = data
+      const result = await $fetch<SoftDeleteResponse>(`/api/erp/customers/${customerId}`, {
+        method: 'DELETE'
+      })
+      const target = customers.value.find((customer) => customer.id === customerId)
+      if (target) {
+        target.is_active = false
+        target.deactivated_at = result.deactivated_at
       }
+      return result
     } catch (err) {
       markUnauthorizedIf401(err)
-      // Keep local seed employees if unauthenticated/offline
+      throw err
+    } finally {
+      delete mutatingCustomerIds.value[customerId]
     }
+  }
+
+  async function restoreCustomer(customerId: string): Promise<RestoreResponse> {
+    mutatingCustomerIds.value[customerId] = true
+    try {
+      const result = await $fetch<RestoreResponse>(`/api/erp/customers/${customerId}/restore`, {
+        method: 'POST'
+      })
+      const target = customers.value.find((customer) => customer.id === customerId)
+      if (target) {
+        target.is_active = true
+        target.deactivated_at = null
+      }
+      return result
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      delete mutatingCustomerIds.value[customerId]
+    }
+  }
+
+  async function fetchEmployees(includeInactive = false): Promise<void> {
+    isLoadingEmployees.value = true
+    try {
+      const query = buildCompanyQuery({ include_inactive: includeInactive || undefined })
+      const data = await $fetch<Employee[]>(`/api/erp/employees${query}`)
+      employees.value = Array.isArray(data) ? data : []
+    } catch (err) {
+      markUnauthorizedIf401(err)
+    } finally {
+      isLoadingEmployees.value = false
+    }
+  }
+
+  async function softDeleteEmployee(employeeId: string): Promise<SoftDeleteResponse> {
+    const result = await $fetch<SoftDeleteResponse>(`/api/erp/employees/${employeeId}`, {
+      method: 'DELETE'
+    })
+    const target = employees.value.find((employee) => employee.id === employeeId)
+    if (target) {
+      target.is_active = false
+      target.deactivated_at = result.deactivated_at
+    }
+    return result
+  }
+
+  async function restoreEmployee(employeeId: string): Promise<RestoreResponse> {
+    const result = await $fetch<RestoreResponse>(`/api/erp/employees/${employeeId}/restore`, {
+      method: 'POST'
+    })
+    const target = employees.value.find((employee) => employee.id === employeeId)
+    if (target) {
+      target.is_active = true
+      target.deactivated_at = null
+    }
+    return result
   }
 
   async function fetchWebhookLogs(): Promise<void> {
     isLoadingWebhooks.value = true
     webhookError.value = null
     try {
-      const data = await $fetch<WebhookLogResponse[]>('/api/erp/webhooks/logs')
-      if (Array.isArray(data)) {
-        webhookFeed.value = data.map(normalizeWebhookLog)
-      } else {
-        webhookFeed.value = []
-      }
+      const query = buildCompanyQuery()
+      const data = await $fetch<WebhookLogResponse[]>(`/api/erp/webhooks/logs${query}`)
+      webhookFeed.value = Array.isArray(data) ? data.map(normalizeWebhookLog) : []
     } catch (err) {
       const status = extractHttpStatus(err)
       if (status === 404) {
@@ -519,7 +692,8 @@ export const useErpStore = defineStore('erp', () => {
 
   async function fetchMetrics(): Promise<void> {
     try {
-      const data = await $fetch<ErpTelemetryMetrics>('/api/erp/metrics')
+      const query = buildCompanyQuery()
+      const data = await $fetch<ErpTelemetryMetrics>(`/api/erp/metrics${query}`)
       if (data && typeof data === 'object') {
         metrics.value = data
         if (typeof data.avg_rag_latency_ms === 'number' && data.avg_rag_latency_ms > 0) {
@@ -534,55 +708,12 @@ export const useErpStore = defineStore('erp', () => {
     }
   }
 
-  async function searchInventorySemantic(query: string): Promise<void> {
-    const trimmed = query.trim()
-    lastSearchQuery.value = trimmed
-    if (!trimmed) {
-      await fetchInventory()
-      return
-    }
-
-    isLoadingInventory.value = true
-    try {
-      const data = await $fetch<InventoryItem[]>('/api/erp/inventory/search', {
-        method: 'POST',
-        body: {
-          query: trimmed,
-          tenant_id: currentUser.value?.tenant_id || 'default-tenant',
-          limit: 5
-        }
-      })
-      if (Array.isArray(data)) {
-        inventory.value = data.map(normalizeInventoryItem)
-        return
-      }
-    } catch (err) {
-      markUnauthorizedIf401(err)
-      // Fallback semantic simulation over seed inventory when offline/unauthenticated
-      const lower = trimmed.toLowerCase()
-      inventory.value = INITIAL_INVENTORY.filter(
-        (item) =>
-          item.name.toLowerCase().includes(lower) ||
-          item.description.toLowerCase().includes(lower) ||
-          item.sku.toLowerCase().includes(lower) ||
-          (item.category ?? '').toLowerCase().includes(lower)
-      ).map((item, idx) =>
-        normalizeInventoryItem({
-          ...item,
-          similarity_distance: Number((0.1 + idx * 0.08).toFixed(4)),
-          similarity_score: Number((0.95 - idx * 0.04).toFixed(2))
-        })
-      )
-    } finally {
-      isLoadingInventory.value = false
-    }
-  }
-
   async function createOrder(payload: OrderCreatePayload): Promise<Order> {
     isCreatingOrder.value = true
     try {
-      // Server-authoritative pricing: only submit customer_id, optional assigned_employee_id, and { sku, quantity }
+      const effectiveCompanyId = payload.company_id || (isAdmin.value ? selectedCompanyId.value : null)
       const requestBody: OrderCreatePayload = {
+        ...(effectiveCompanyId ? { company_id: effectiveCompanyId } : {}),
         customer_id: payload.customer_id,
         ...(payload.assigned_employee_id ? { assigned_employee_id: payload.assigned_employee_id } : {}),
         items: payload.items.map((item) => ({
@@ -619,7 +750,8 @@ export const useErpStore = defineStore('erp', () => {
     updatingOrderIds.value[orderId] = true
     target.status = status
     if (status === 'PAID' && !target.assigned_employee_id && employees.value.length > 0) {
-      target.assigned_employee_id = employees.value[0]?.id ?? null
+      const firstActive = employees.value.find((emp) => emp.is_active)
+      target.assigned_employee_id = firstActive?.id ?? employees.value[0]?.id ?? null
     }
 
     try {
@@ -640,38 +772,387 @@ export const useErpStore = defineStore('erp', () => {
     }
   }
 
+  async function notifyOrderTelegram(
+    orderId: string,
+    telegramUserId?: string | null
+  ): Promise<TelegramDispatchResponse> {
+    notifyingOrderIds.value[orderId] = true
+    try {
+      return await $fetch<TelegramDispatchResponse>(`/api/erp/orders/${orderId}/notify-telegram`, {
+        method: 'POST',
+        body: telegramUserId ? { telegram_user_id: telegramUserId } : {}
+      })
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      delete notifyingOrderIds.value[orderId]
+    }
+  }
+
+  async function fetchCompanies(includeInactive = false): Promise<void> {
+    isLoadingCompanies.value = true
+    companiesError.value = null
+    try {
+      const query = includeInactive ? '?include_inactive=true' : ''
+      const data = await $fetch<Company[]>(`/api/companies${query}`)
+      companies.value = Array.isArray(data) ? data : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        companiesError.value = extractErrorMessage(err, 'Unable to load companies')
+      }
+    } finally {
+      isLoadingCompanies.value = false
+    }
+  }
+
+  async function fetchBankCatalog(): Promise<void> {
+    isLoadingBanks.value = true
+    try {
+      const data = await $fetch<BankCatalogResponse>('/api/companies/banks')
+      if (data && Array.isArray(data.banks)) {
+        bankCatalog.value = {
+          banks: data.banks,
+          sepay_linked_accounts: Array.isArray(data.sepay_linked_accounts)
+            ? data.sepay_linked_accounts
+            : [],
+          sepay_api_configured: Boolean(data.sepay_api_configured),
+          bankhub_configured: Boolean(data.bankhub_configured)
+        }
+      }
+    } catch (err) {
+      markUnauthorizedIf401(err)
+    } finally {
+      isLoadingBanks.value = false
+    }
+  }
+
+  async function createCompany(payload: CompanyCreatePayload): Promise<Company> {
+    isCreatingCompany.value = true
+    try {
+      const created = await $fetch<Company>('/api/companies', {
+        method: 'POST',
+        body: payload
+      })
+      companies.value.unshift(created)
+      return created
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      isCreatingCompany.value = false
+    }
+  }
+
+  async function updateCompanyBank(companyId: string, payload: CompanyBankUpdatePayload): Promise<Company> {
+    try {
+      const updated = await $fetch<Company>(`/api/companies/${companyId}/bank`, {
+        method: 'PATCH',
+        body: payload
+      })
+      const idx = companies.value.findIndex((c) => c.id === companyId)
+      if (idx !== -1) {
+        companies.value[idx] = updated
+      }
+      return updated
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    }
+  }
+
+  async function softDeleteCompany(companyId: string): Promise<SoftDeleteResponse> {
+    try {
+      const res = await $fetch<SoftDeleteResponse>(`/api/companies/${companyId}`, {
+        method: 'DELETE'
+      })
+      const target = companies.value.find((c) => c.id === companyId)
+      if (target) {
+        target.is_active = false
+        target.deactivated_at = res.deactivated_at
+      }
+      return res
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    }
+  }
+
+  async function restoreCompany(companyId: string): Promise<RestoreResponse> {
+    try {
+      const res = await $fetch<RestoreResponse>(`/api/companies/${companyId}/restore`, {
+        method: 'POST'
+      })
+      const target = companies.value.find((c) => c.id === companyId)
+      if (target) {
+        target.is_active = true
+        target.deactivated_at = null
+      }
+      return res
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    }
+  }
+
+  async function createManager(companyId: string, payload: ManagerCreatePayload): Promise<ManagerCreateResponse> {
+    try {
+      return await $fetch<ManagerCreateResponse>(`/api/companies/${companyId}/managers`, {
+        method: 'POST',
+        body: payload
+      })
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    }
+  }
+
+  async function fetchStaff(): Promise<void> {
+    isLoadingStaff.value = true
+    staffError.value = null
+    try {
+      const query = buildCompanyQuery()
+      const data = await $fetch<StaffMemberSummary[]>(`/api/erp/staff${query}`)
+      staffMembers.value = Array.isArray(data) ? data : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        staffError.value = extractErrorMessage(err, 'Unable to load staff roster')
+      }
+    } finally {
+      isLoadingStaff.value = false
+    }
+  }
+
+  async function createStaff(payload: StaffCreatePayload): Promise<StaffCreateResponse> {
+    isCreatingStaff.value = true
+    try {
+      const created = await $fetch<StaffCreateResponse>('/api/erp/staff', {
+        method: 'POST',
+        body: payload
+      })
+      await fetchStaff()
+      return created
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      isCreatingStaff.value = false
+    }
+  }
+
+  async function fetchMyWork(): Promise<void> {
+    isLoadingMyWork.value = true
+    myWorkError.value = null
+    try {
+      const data = await $fetch<Order[]>('/api/erp/my-work')
+      myWorkOrders.value = Array.isArray(data) ? data.map(normalizeOrder) : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        myWorkError.value = extractErrorMessage(err, 'Unable to load assigned work orders')
+      }
+    } finally {
+      isLoadingMyWork.value = false
+    }
+  }
+
+  async function updateMyWorkStatus(orderId: string, status: OrderStatus): Promise<void> {
+    const target = myWorkOrders.value.find((o) => o.id === orderId)
+    if (!target) return
+    const previousStatus = target.status
+    if (!isValidOrderTransition(previousStatus, status)) {
+      throw new Error(`Invalid order transition: ${previousStatus} -> ${status}`)
+    }
+    updatingOrderIds.value[orderId] = true
+    target.status = status
+    try {
+      const updated = await $fetch<Order>(`/api/erp/orders/${orderId}/status`, {
+        method: 'PATCH',
+        body: { status }
+      })
+      if (updated) {
+        Object.assign(target, normalizeOrder(updated))
+      }
+    } catch (err) {
+      target.status = previousStatus
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      delete updatingOrderIds.value[orderId]
+    }
+  }
+
+  async function fetchManagerDashboard(): Promise<void> {
+    isLoadingDashboard.value = true
+    dashboardError.value = null
+    try {
+      const query = buildCompanyQuery()
+      const data = await $fetch<ManagerDashboardSummary>(`/api/erp/dashboard/manager${query}`)
+      managerDashboard.value = data
+    } catch (err) {
+      const status = extractHttpStatus(err)
+      if (status !== 404 && !markUnauthorizedIf401(err)) {
+        dashboardError.value = extractErrorMessage(err, 'Unable to load analytics dashboard')
+      }
+    } finally {
+      isLoadingDashboard.value = false
+    }
+  }
+
+  async function fetchChats(channel?: string): Promise<void> {
+    isLoadingChats.value = true
+    chatsError.value = null
+    try {
+      const query = buildCompanyQuery({
+        channel: channel && channel !== 'all' ? channel : undefined
+      })
+      const data = await $fetch<ChannelConversation[]>(`/api/erp/chats${query}`)
+      chats.value = Array.isArray(data) ? data : []
+    } catch (err) {
+      if (!markUnauthorizedIf401(err)) {
+        chatsError.value = extractErrorMessage(err, 'Unable to load omnichannel chats')
+      }
+    } finally {
+      isLoadingChats.value = false
+    }
+  }
+
+  async function fetchChatMessages(conversationId: string): Promise<void> {
+    isLoadingChatMessages.value = true
+    try {
+      const data = await $fetch<ChannelMessage[]>(`/api/erp/chats/${conversationId}/messages`)
+      activeChatMessages.value = Array.isArray(data) ? data : []
+      const conv = chats.value.find((c) => c.id === conversationId)
+      if (conv) {
+        conv.unread_count = 0
+      }
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      isLoadingChatMessages.value = false
+    }
+  }
+
+  async function replyToChat(conversationId: string, content: string): Promise<ChannelMessage> {
+    isSendingChatReply.value = true
+    try {
+      const msg = await $fetch<ChannelMessage>(`/api/erp/chats/${conversationId}/reply`, {
+        method: 'POST',
+        body: { content: content.trim() }
+      })
+      activeChatMessages.value.push(msg)
+      const conv = chats.value.find((c) => c.id === conversationId)
+      if (conv) {
+        conv.last_message_preview = msg.content
+        conv.last_message_at = msg.created_at
+      }
+      return msg
+    } catch (err) {
+      markUnauthorizedIf401(err)
+      throw err
+    } finally {
+      isSendingChatReply.value = false
+    }
+  }
+
   return {
     currentUser,
     isAuthenticated,
+    isLiveAuthenticated,
+    userRole,
+    isAdmin,
+    isManager,
+    isStaff,
+    mustChangePassword,
     requiresAuth,
     isAuthenticating,
     authError,
+    selectedCompanyId,
+    activeCompanyId,
+    activeCompanyName,
+    companies,
+    bankCatalog,
+    staffMembers,
+    myWorkOrders,
+    managerDashboard,
+    chats,
+    activeChatMessages,
     inventory,
     orders,
     customers,
     employees,
     webhookFeed,
     metrics,
+    isLoadingCompanies,
+    isLoadingBanks,
+    isCreatingCompany,
+    isLoadingStaff,
+    isCreatingStaff,
+    isLoadingMyWork,
+    isLoadingDashboard,
+    isLoadingChats,
+    isLoadingChatMessages,
+    isSendingChatReply,
     isLoadingInventory,
     isLoadingOrders,
-    updatingOrderIds,
-    isCreatingOrder,
+    isLoadingCustomers,
+    isLoadingEmployees,
     isLoadingWebhooks,
+    isCreatingOrder,
+    isCreatingInventory,
+    updatingOrderIds,
+    mutatingInventoryIds,
+    mutatingCustomerIds,
+    notifyingOrderIds,
+    companiesError,
+    staffError,
+    myWorkError,
+    dashboardError,
+    chatsError,
+    inventoryError,
+    ordersError,
+    customersError,
     webhookError,
     lastSearchQuery,
     avgRagLatencyMs,
     ordersByStatus,
+    setSelectedCompanyId,
     fetchSession,
     login,
+    signup,
+    changePassword,
     logout,
+    fetchCompanies,
+    fetchBankCatalog,
+    createCompany,
+    updateCompanyBank,
+    softDeleteCompany,
+    restoreCompany,
+    createManager,
+    fetchStaff,
+    createStaff,
+    fetchMyWork,
+    updateMyWorkStatus,
+    fetchManagerDashboard,
+    fetchChats,
+    fetchChatMessages,
+    replyToChat,
     fetchInventory,
+    createInventoryItem,
+    softDeleteInventory,
+    restoreInventory,
     fetchOrders,
     fetchCustomers,
+    softDeleteCustomer,
+    restoreCustomer,
     fetchEmployees,
+    softDeleteEmployee,
+    restoreEmployee,
     fetchWebhookLogs,
     fetchMetrics,
     searchInventorySemantic,
     createOrder,
-    updateOrderStatus
+    updateOrderStatus,
+    notifyOrderTelegram
   }
 })

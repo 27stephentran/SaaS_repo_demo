@@ -1,20 +1,33 @@
 import {
   forwardAuthorizedRequest,
+  forwardDemoAuthorizedRequest,
+  getAuthCookies,
   getBackendBaseUrl,
-  type BackendPrincipalResponse
+  getDemoAuthCookie
 } from '~/server/utils/backendProxy'
+import { serializeAuthSessionResponse } from '~/server/utils/serializers'
 
 export default defineEventHandler(async (event) => {
   const backendBase = getBackendBaseUrl()
-  const principal = (await forwardAuthorizedRequest(event, `${backendBase}/api/v1/auth/me`, {
-    method: 'GET'
-  })) as BackendPrincipalResponse
+  const { accessToken, refreshToken } = getAuthCookies(event)
 
-  return {
-    authenticated: true,
-    user_id: principal.user_id,
-    email: principal.email,
-    tenant_id: principal.tenant_id,
-    role: principal.role
+  if (accessToken || refreshToken) {
+    const principal = await forwardAuthorizedRequest(event, `${backendBase}/api/v1/auth/me`, {
+      method: 'GET'
+    })
+    return serializeAuthSessionResponse(principal)
   }
+
+  const demoAccessToken = getDemoAuthCookie(event)
+  if (demoAccessToken) {
+    const principal = await forwardDemoAuthorizedRequest(event, `${backendBase}/api/v1/auth/me`, {
+      method: 'GET'
+    })
+    return serializeAuthSessionResponse(principal)
+  }
+
+  throw createError({
+    statusCode: 401,
+    statusMessage: 'Authentication required'
+  })
 })

@@ -1,5 +1,6 @@
-import { createEvent, createError, getHeader, getRequestURL } from 'h3'
+import { createError, createEvent, getHeader, getRequestURL } from 'h3'
 import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { validateErpProxyPath } from '~/server/api/erp/[...path]'
 import { assertSameOriginCsrf } from '~/server/utils/backendProxy'
 import {
@@ -7,42 +8,14 @@ import {
   isValidOrderTransition,
   useErpStore
 } from '~/stores/erp'
-import type { Order, OrderCreatePayload, OrderStatus } from '~/types/erp'
-
-interface VitestExpectation {
-  toBe(expected: unknown): void
-  toEqual(expected: unknown): void
-  toMatchObject(expected: Record<string, unknown>): void
-  toHaveLength(expected: number): void
-  toBeUndefined(): void
-  toHaveBeenCalledTimes(expected: number): void
-  toHaveBeenCalledWith(...args: unknown[]): void
-  toThrow(expected?: string | RegExp): void
-  not: VitestExpectation
-  rejects: {
-    toThrow(expected?: string | RegExp): Promise<void>
-  }
-}
-
-interface VitestMock<TArgs extends unknown[] = unknown[], TReturn = unknown> {
-  (...args: TArgs): TReturn
-  mockResolvedValueOnce(value: Awaited<TReturn>): VitestMock<TArgs, TReturn>
-  mockRejectedValueOnce(error: unknown): VitestMock<TArgs, TReturn>
-}
-
-declare const describe: (name: string, fn: () => void) => void
-declare const it: (name: string, fn: () => void | Promise<void>) => void
-declare const beforeEach: (fn: () => void) => void
-declare const afterEach: (fn: () => void) => void
-declare const expect: (actual: unknown) => VitestExpectation
-declare const vi: {
-  fn<TArgs extends unknown[] = unknown[], TReturn = unknown>(
-    impl?: (...args: TArgs) => TReturn
-  ): VitestMock<TArgs, TReturn>
-  stubGlobal(name: string, value: unknown): void
-  unstubAllGlobals(): void
-  restoreAllMocks(): void
-}
+import type {
+  Order,
+  OrderCreatePayload,
+  OrderStatus,
+  RestoreResponse,
+  SoftDeleteResponse,
+  TelegramDispatchResponse
+} from '~/types/erp'
 
 function makeH3Event(headers: Record<string, string>, url = '/api/erp/orders') {
   const req = {
@@ -57,7 +30,30 @@ function makeH3Event(headers: Record<string, string>, url = '/api/erp/orders') {
   return createEvent(req as never, res as never)
 }
 
-describe('useErpStore order transitions, authoritative payload, and telemetry mapping', () => {
+function makeSampleOrder(overrides: Partial<Order> = {}): Order {
+  return {
+    id: '55555555-5555-4555-8555-555555555501',
+    tenant_id: 'default-tenant',
+    order_code: 'ORD-2026-9001',
+    customer_id: '22222222-2222-4222-8222-222222222201',
+    items: [
+      {
+        sku: 'COFFEE-ARABICA-1KG',
+        name: 'Cau Dat Arabica Specialty Beans (1kg)',
+        quantity: 2,
+        unit_price_vnd: 480000
+      }
+    ],
+    total_amount_vnd: 960000,
+    status: 'PENDING_PAYMENT',
+    sepay_reference: 'SEPAY9001',
+    vietqr_url: 'https://qr.sepay.vn/img?amount=960000&des=SEPAY9001',
+    created_at: '2026-11-19T10:00:00Z',
+    ...overrides
+  }
+}
+
+describe('useErpStore empty initial state, order transitions, and actions', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
@@ -65,6 +61,20 @@ describe('useErpStore order transitions, authoritative payload, and telemetry ma
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('starts completely empty with zero hardcoded seed data', () => {
+    const store = useErpStore()
+
+    expect(store.inventory).toEqual([])
+    expect(store.orders).toEqual([])
+    expect(store.customers).toEqual([])
+    expect(store.employees).toEqual([])
+    expect(store.webhookFeed).toEqual([])
+    expect(store.metrics).toBeNull()
+    expect(store.currentUser).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.isLiveAuthenticated).toBe(false)
   })
 
   it('enforces ALLOWED_ORDER_TRANSITIONS state machine rules', async () => {
@@ -89,36 +99,30 @@ describe('useErpStore order transitions, authoritative payload, and telemetry ma
     const fetchMock = vi.fn()
     vi.stubGlobal('$fetch', fetchMock)
     const store = useErpStore()
-    const pendingOrder = store.orders.find((order) => order.status === 'PENDING_PAYMENT')
-    expect(pendingOrder).not.toBeUndefined()
+    const pendingOrder = makeSampleOrder({ status: 'PENDING_PAYMENT' })
+    store.orders = [pendingOrder]
 
     await expect(
-      store.updateOrderStatus(pendingOrder!.id, 'COMPLETED' as OrderStatus)
+      store.updateOrderStatus(pendingOrder.id, 'COMPLETED' as OrderStatus)
     ).rejects.toThrow(/Invalid order transition/)
     expect(fetchMock).toHaveBeenCalledTimes(0)
+    expect(store.orders[0]?.status).toBe('PENDING_PAYMENT')
+  })
+
+  it('rolls back optimistic order status update when backend PATCH fails', async () => {
+    const fetchMock = vi.fn().mockRejectedValueOnce({ statusCode: 500, statusMessage: 'DB error' })
+    vi.stubGlobal('$fetch', fetchMock)
+
+    const store = useErpStore()
+    store.orders = [makeSampleOrder({ id: 'ord-1', status: 'PENDING_PAYMENT' })]
+
+    await expect(store.updateOrderStatus('ord-1', 'PAID')).rejects.toMatchObject({ statusCode: 500 })
+    expect(store.orders[0]?.status).toBe('PENDING_PAYMENT')
+    expect(store.updatingOrderIds['ord-1']).toBeUndefined()
   })
 
   it('submits server-authoritative order payload without forged unit_price_vnd', async () => {
-    const serverOrder: Order = {
-      id: '55555555-5555-4555-8555-555555555501',
-      tenant_id: 'default-tenant',
-      order_code: 'ORD-2026-9001',
-      customer_id: '22222222-2222-4222-8222-222222222201',
-      items: [
-        {
-          sku: 'COFFEE-ARABICA-1KG',
-          name: 'Cau Dat Arabica Specialty Beans (1kg)',
-          quantity: 2,
-          unit_price_vnd: 480000
-        }
-      ],
-      total_amount_vnd: 960000,
-      status: 'PENDING_PAYMENT',
-      sepay_reference: 'SEPAY9001',
-      vietqr_url: 'https://qr.sepay.vn/img?amount=960000&des=SEPAY9001',
-      created_at: '2026-11-19T10:00:00Z'
-    }
-
+    const serverOrder = makeSampleOrder()
     const fetchMock = vi.fn().mockResolvedValueOnce(serverOrder)
     vi.stubGlobal('$fetch', fetchMock)
 
@@ -200,6 +204,149 @@ describe('useErpStore order transitions, authoritative payload, and telemetry ma
     })
     expect(store.avgRagLatencyMs).toBe(215)
     expect(store.metrics?.paid_and_dispatched_orders).toBe(3)
+  })
+
+  it('supports softDeleteInventory and restoreInventory actions', async () => {
+    const softDeleted: SoftDeleteResponse = {
+      resource: 'inventory',
+      record_id: 'inv-1',
+      tenant_id: 'default-tenant',
+      is_active: false,
+      deactivated_at: '2026-11-20T09:00:00Z'
+    }
+    const restored: RestoreResponse = {
+      resource: 'inventory',
+      record_id: 'inv-1',
+      tenant_id: 'default-tenant',
+      is_active: true,
+      deactivated_at: null
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(softDeleted)
+      .mockResolvedValueOnce(restored)
+    vi.stubGlobal('$fetch', fetchMock)
+
+    const store = useErpStore()
+    store.inventory = [
+      {
+        id: 'inv-1',
+        sku: 'SKU-1',
+        name: 'Specialty Coffee',
+        description: 'Arabica beans',
+        price_vnd: 480000,
+        stock_quantity: 10,
+        has_embedding: true,
+        is_active: true,
+        deactivated_at: null
+      }
+    ]
+
+    const delRes = await store.softDeleteInventory('inv-1')
+    expect(delRes.is_active).toBe(false)
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/erp/inventory/inv-1', { method: 'DELETE' })
+    expect(store.inventory[0]?.is_active).toBe(false)
+    expect(store.inventory[0]?.deactivated_at).toBe('2026-11-20T09:00:00Z')
+    expect(store.mutatingInventoryIds['inv-1']).toBeUndefined()
+
+    const restoreRes = await store.restoreInventory('inv-1')
+    expect(restoreRes.is_active).toBe(true)
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/erp/inventory/inv-1/restore', { method: 'POST' })
+    expect(store.inventory[0]?.is_active).toBe(true)
+    expect(store.inventory[0]?.deactivated_at).toBeNull()
+    expect(store.mutatingInventoryIds['inv-1']).toBeUndefined()
+  })
+
+  it('supports softDeleteCustomer and restoreCustomer actions', async () => {
+    const softDeleted: SoftDeleteResponse = {
+      resource: 'customers',
+      record_id: 'cust-1',
+      tenant_id: 'default-tenant',
+      is_active: false,
+      deactivated_at: '2026-11-20T09:10:00Z'
+    }
+    const restored: RestoreResponse = {
+      resource: 'customers',
+      record_id: 'cust-1',
+      tenant_id: 'default-tenant',
+      is_active: true,
+      deactivated_at: null
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(softDeleted)
+      .mockResolvedValueOnce(restored)
+    vi.stubGlobal('$fetch', fetchMock)
+
+    const store = useErpStore()
+    store.customers = [
+      {
+        id: 'cust-1',
+        meta_psid: 'PSID_001',
+        full_name: 'Nguyen Van A',
+        is_active: true,
+        deactivated_at: null,
+        created_at: '2026-11-20T08:00:00Z'
+      }
+    ]
+
+    const delRes = await store.softDeleteCustomer('cust-1')
+    expect(delRes.is_active).toBe(false)
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/erp/customers/cust-1', { method: 'DELETE' })
+    expect(store.customers[0]?.is_active).toBe(false)
+    expect(store.customers[0]?.deactivated_at).toBe('2026-11-20T09:10:00Z')
+    expect(store.mutatingCustomerIds['cust-1']).toBeUndefined()
+
+    const restoreRes = await store.restoreCustomer('cust-1')
+    expect(restoreRes.is_active).toBe(true)
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/erp/customers/cust-1/restore', { method: 'POST' })
+    expect(store.customers[0]?.is_active).toBe(true)
+    expect(store.customers[0]?.deactivated_at).toBeNull()
+    expect(store.mutatingCustomerIds['cust-1']).toBeUndefined()
+  })
+
+  it('dispatches notifyOrderTelegram and handles 401 unauthorized state', async () => {
+    const dispatchRes: TelegramDispatchResponse = {
+      dispatched: true,
+      simulated: false,
+      telegram_user_id: '123456789',
+      order_code: 'ORD-2026-9001',
+      preview_text: 'Order ORD-2026-9001 dispatched'
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(dispatchRes)
+      .mockResolvedValueOnce(dispatchRes)
+      .mockRejectedValueOnce({ statusCode: 401, statusMessage: 'Unauthorized' })
+    vi.stubGlobal('$fetch', fetchMock)
+
+    const store = useErpStore()
+    store.currentUser = {
+      authenticated: true,
+      email: 'ops@acme.io',
+      tenant_id: 'acme',
+      role: 'admin',
+      permission_group: 'live_api'
+    }
+
+    const resWithId = await store.notifyOrderTelegram('ord-1', '123456789')
+    expect(resWithId).toEqual(dispatchRes)
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/erp/orders/ord-1/notify-telegram', {
+      method: 'POST',
+      body: { telegram_user_id: '123456789' }
+    })
+    expect(store.notifyingOrderIds['ord-1']).toBeUndefined()
+
+    await store.notifyOrderTelegram('ord-2')
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/erp/orders/ord-2/notify-telegram', {
+      method: 'POST',
+      body: {}
+    })
+
+    await expect(store.notifyOrderTelegram('ord-3')).rejects.toMatchObject({ statusCode: 401 })
+    expect(store.currentUser).toBeNull()
+    expect(store.requiresAuth).toBe(true)
+    expect(store.notifyingOrderIds['ord-3']).toBeUndefined()
   })
 })
 

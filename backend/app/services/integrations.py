@@ -46,7 +46,8 @@ class MetaGraphClient:
         self.api_version = settings.meta_api_version
         self.access_token = settings.meta_access_token
         self.app_secret = settings.meta_app_secret
-        self.base_url = f"https://graph.facebook.com/{self.api_version}"
+        meta_base = settings.meta_graph_base_url.strip().rstrip("/")
+        self.base_url = f"{meta_base}/{self.api_version}"
         self._client: httpx.AsyncClient | None = None
         self._client_cls: Any = None
 
@@ -201,6 +202,30 @@ class MetaGraphClient:
             }
 
 
+VIETNAM_BANKS_DIRECTORY: tuple[dict[str, Any], ...] = (
+    {"code": "MB", "bin": "970422", "name": "Ngân hàng TMCP Quân đội", "short_name": "MBBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "VCB", "bin": "970436", "name": "Ngân hàng TMCP Ngoại thương Việt Nam", "short_name": "Vietcombank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "TCB", "bin": "970407", "name": "Ngân hàng TMCP Kỹ thương Việt Nam", "short_name": "Techcombank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "ACB", "bin": "970416", "name": "Ngân hàng TMCP Á Châu", "short_name": "ACB", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "BIDV", "bin": "970418", "name": "Ngân hàng TMCP Đầu tư và Phát triển Việt Nam", "short_name": "BIDV", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "CTG", "bin": "970415", "name": "Ngân hàng TMCP Công thương Việt Nam", "short_name": "VietinBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "VPB", "bin": "970432", "name": "Ngân hàng TMCP Việt Nam Thịnh Vượng", "short_name": "VPBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "TPB", "bin": "970423", "name": "Ngân hàng TMCP Tiên Phong", "short_name": "TPBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "STB", "bin": "970403", "name": "Ngân hàng TMCP Sài Gòn Thương Tín", "short_name": "Sacombank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "HDB", "bin": "970437", "name": "Ngân hàng TMCP Phát triển TP.HCM", "short_name": "HDBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "VIB", "bin": "970441", "name": "Ngân hàng TMCP Quốc tế Việt Nam", "short_name": "VIB", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "OCB", "bin": "970448", "name": "Ngân hàng TMCP Phương Đông", "short_name": "OCB", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "MSB", "bin": "970426", "name": "Ngân hàng TMCP Hàng Hải Việt Nam", "short_name": "MSB", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "SHB", "bin": "970443", "name": "Ngân hàng TMCP Sài Gòn - Hà Nội", "short_name": "SHB", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "LPB", "bin": "970449", "name": "Ngân hàng TMCP Lộc Phát Việt Nam", "short_name": "LPBank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "VBA", "bin": "970405", "name": "Ngân hàng Nông nghiệp và Phát triển Nông thôn", "short_name": "Agribank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "EXB", "bin": "970431", "name": "Ngân hàng TMCP Xuất Nhập khẩu Việt Nam", "short_name": "Eximbank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "SEAB", "bin": "970440", "name": "Ngân hàng TMCP Đông Nam Á", "short_name": "SeABank", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "CAKE", "bin": "546034", "name": "Ngân hàng số CAKE by VPBank", "short_name": "CAKE", "vietqr_supported": True, "sepay_supported": True},
+    {"code": "TIMO", "bin": "963388", "name": "Ngân hàng số Timo by BVBank", "short_name": "Timo", "vietqr_supported": True, "sepay_supported": True},
+)
+
+
 class SePayClient:
     """SePay Webhooks & Dynamic VietQR client aligned with developer.sepay.vn specs."""
 
@@ -218,12 +243,11 @@ class SePayClient:
         "error_url",
         "cancel_url",
     )
-    PG_CHECKOUT_SANDBOX_URL = "https://pay-sandbox.sepay.vn/v1/checkout/init"
-    PG_CHECKOUT_PROD_URL = "https://pay.sepay.vn/v1/checkout/init"
 
     def __init__(self) -> None:
         settings = get_settings()
         self.api_key = settings.sepay_api_key
+        self.api_v2_base_url = settings.sepay_api_v2_base_url.strip().rstrip("/")
         self.account_number = settings.sepay_account_number
         self.bank_code = settings.sepay_bank_code
         self.webhook_secret = settings.sepay_webhook_secret
@@ -231,6 +255,9 @@ class SePayClient:
         self.payment_prefix = settings.sepay_payment_prefix or "DH"
         self.memo_prefix = settings.sepay_memo_prefix
         self.qr_template = settings.sepay_qr_template
+        self.qr_base_url = settings.sepay_qr_base_url.strip().rstrip("/")
+        self.pg_sandbox_url = settings.sepay_pg_sandbox_url.strip()
+        self.pg_prod_url = settings.sepay_pg_prod_url.strip()
         self.timestamp_tolerance_seconds = settings.sepay_timestamp_tolerance_seconds
         self.strict_account_check = settings.sepay_strict_account_check
         self.pg_merchant_id = settings.sepay_pg_merchant_id
@@ -242,25 +269,160 @@ class SePayClient:
             re.IGNORECASE,
         )
         self._processed_transactions: set[str] = set()
+        self._client: httpx.AsyncClient | None = None
+        self._client_cls: Any = None
 
-    def generate_vietqr_url(self, amount_vnd: int, order_code: str) -> str:
+    async def _get_client(self) -> httpx.AsyncClient:
+        current_cls = httpx.AsyncClient
+        if (
+            self._client is None
+            or getattr(self._client, "is_closed", False)
+            or self._client_cls is not current_cls
+        ):
+            old_client = self._client
+            self._client = current_cls(
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+                limits=_DEFAULT_HTTP_LIMITS,
+            )
+            self._client_cls = current_cls
+            if old_client is not None and not getattr(old_client, "is_closed", False):
+                if hasattr(old_client, "aclose"):
+                    try:
+                        await old_client.aclose()
+                    except Exception:
+                        pass
+        return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        self._client_cls = None
+        if client is not None and not getattr(client, "is_closed", False):
+            if hasattr(client, "aclose"):
+                await client.aclose()
+
+    def generate_vietqr_url(
+        self,
+        amount_vnd: int,
+        order_code: str,
+        account_number: str | None = None,
+        bank_code: str | None = None,
+        memo_prefix: str | None = None,
+    ) -> str:
         """Generate a dynamic SePay VietQR image URL embedding amount, memo prefix, and order code."""
-        prefix = (self.memo_prefix or "").strip()
+        effective_acc = (
+            account_number.strip()
+            if account_number is not None and account_number.strip()
+            else (self.account_number or "").strip()
+        )
+        effective_bank = (
+            bank_code.strip()
+            if bank_code is not None and bank_code.strip()
+            else (self.bank_code or "").strip()
+        )
+        prefix = (
+            memo_prefix.strip()
+            if memo_prefix is not None and memo_prefix.strip()
+            else (self.memo_prefix or "").strip()
+        )
         clean_code = order_code.strip().upper()
         memo_text = f"{prefix} {clean_code}".strip() if prefix else clean_code
         encoded_desc = quote(memo_text)
         url = (
-            f"https://qr.sepay.vn/img?acc={quote(self.account_number)}"
-            f"&bank={quote(self.bank_code)}&amount={amount_vnd}&des={encoded_desc}"
+            f"{self.qr_base_url}?acc={quote(effective_acc)}"
+            f"&bank={quote(effective_bank)}&amount={amount_vnd}&des={encoded_desc}"
         )
         if self.qr_template:
             url += f"&template={quote(self.qr_template)}"
         return url
 
-    def extract_order_code(self, content: str | None, explicit_code: str | None = None) -> str | None:
+    async def list_linked_bank_accounts(self) -> list[dict[str, Any]]:
+        """List SePay-linked bank accounts from `{sepay_api_v2_base_url}/bank-accounts` when configured."""
+        token = (self.api_key or "").strip()
+        if not token or not self.api_v2_base_url:
+            return []
+
+        url = f"{self.api_v2_base_url}/bank-accounts"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            client = await self._get_client()
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning(
+                "SePay list_linked_bank_accounts failed (error_type=%s)",
+                type(exc).__name__,
+            )
+            return []
+
+        raw_accounts: Any = []
+        if isinstance(payload, dict):
+            raw_accounts = (
+                payload.get("bankaccounts")
+                or payload.get("bank_accounts")
+                or payload.get("data")
+                or []
+            )
+        elif isinstance(payload, list):
+            raw_accounts = payload
+
+        if not isinstance(raw_accounts, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for entry in raw_accounts:
+            if not isinstance(entry, dict):
+                continue
+            acc_num = str(
+                entry.get("account_number") or entry.get("accountNumber") or ""
+            ).strip()
+            if not acc_num:
+                continue
+            acc_id = str(entry.get("id") or acc_num).strip()
+            bank_short = str(
+                entry.get("bank_short_name")
+                or entry.get("bank_brand_name")
+                or entry.get("bank_code")
+                or ""
+            ).strip()
+            bank_code_val = str(
+                entry.get("bank_code") or entry.get("bank_bin") or bank_short
+            ).strip()
+            holder = str(
+                entry.get("account_holder_name") or entry.get("account_name") or ""
+            ).strip()
+            accumulated_raw = entry.get("accumulated")
+            try:
+                accumulated_val = int(accumulated_raw) if accumulated_raw is not None else None
+            except (TypeError, ValueError):
+                accumulated_val = None
+            normalized.append(
+                {
+                    "id": acc_id,
+                    "bank_code": bank_code_val,
+                    "bank_short_name": bank_short,
+                    "account_number": acc_num,
+                    "account_holder_name": holder,
+                    "accumulated": accumulated_val,
+                    "active": bool(entry.get("active", True)),
+                }
+            )
+        return normalized
+
+    def extract_order_code(
+        self,
+        content: str | None,
+        explicit_code: str | None = None,
+        memo_prefix: str | None = None,
+    ) -> str | None:
         """Extract canonical order code (e.g. `DH1001`) preferring SePay-parsed `code` over content regex."""
         payment_prefix = (self.payment_prefix or "DH").strip() or "DH"
-        memo_prefix = (self.memo_prefix or "").strip()
+        effective_memo_prefix = (
+            memo_prefix.strip()
+            if memo_prefix is not None and memo_prefix.strip()
+            else (self.memo_prefix or "").strip()
+        )
 
         if explicit_code and explicit_code.strip():
             cleaned_explicit = explicit_code.strip().upper()
@@ -269,7 +431,7 @@ class SePayClient:
                 cleaned_explicit,
                 re.IGNORECASE,
             )
-            if explicit_match and memo_prefix and cleaned_explicit.startswith(memo_prefix.upper()):
+            if explicit_match and effective_memo_prefix and cleaned_explicit.startswith(effective_memo_prefix.upper()):
                 return explicit_match.group(1).upper()
             return cleaned_explicit
 
@@ -284,9 +446,9 @@ class SePayClient:
             return match.group(1).upper()
 
         # 2. Configured memo_prefix + optional space + order code (e.g. "SEVQRDH1001" or "SEVQR DH1001")
-        if memo_prefix:
+        if effective_memo_prefix:
             prefixed_pattern = re.compile(
-                rf"{re.escape(memo_prefix)}\s*({re.escape(payment_prefix)}\d+)\b",
+                rf"{re.escape(effective_memo_prefix)}\s*({re.escape(payment_prefix)}\d+)\b",
                 re.IGNORECASE,
             )
             prefixed_match = prefixed_pattern.search(text)
@@ -481,7 +643,7 @@ class SePayClient:
 
         env = (self.pg_env or "sandbox").strip().lower()
         checkout_url = (
-            self.PG_CHECKOUT_PROD_URL if env == "production" else self.PG_CHECKOUT_SANDBOX_URL
+            self.pg_prod_url if env == "production" else self.pg_sandbox_url
         )
         return {
             "checkout_url": checkout_url,
@@ -502,6 +664,7 @@ class TelegramDispatchClient:
     def __init__(self) -> None:
         settings = get_settings()
         self.bot_token = settings.telegram_bot_token
+        self.api_base_url = settings.telegram_api_base_url.strip().rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._client_cls: Any = None
 
@@ -589,16 +752,17 @@ class TelegramDispatchClient:
             "parse_mode": "HTML",
         }
 
-        if not self.bot_token or self.bot_token.startswith("123456789:"):
+        if not self.bot_token.strip():
             return {
                 "dispatched": True,
                 "simulated": True,
                 "telegram_user_id": telegram_user_id,
                 "order_code": order_code,
                 "text": message_text,
+                "preview_text": message_text,
             }
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        url = f"{self.api_base_url}/bot{self.bot_token}/sendMessage"
         try:
             telegram_response = await self._post_with_retry(url, payload=payload)
             return {
@@ -606,6 +770,7 @@ class TelegramDispatchClient:
                 "simulated": False,
                 "telegram_user_id": telegram_user_id,
                 "order_code": order_code,
+                "preview_text": message_text,
                 "telegram_response": telegram_response,
             }
         except httpx.HTTPError as exc:
@@ -644,12 +809,169 @@ class TelegramDispatchClient:
             }
 
 
+class SePayBankHubClient:
+    """Async client for SePay Bank Hub API (`create_company` & `create_link_token`)."""
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self.base_url = settings.sepay_bankhub_base_url.strip().rstrip("/")
+        self.client_id = settings.sepay_bankhub_client_id.strip()
+        self.client_secret = settings.sepay_bankhub_client_secret.strip()
+        self._client: httpx.AsyncClient | None = None
+        self._client_cls: Any = None
+
+    @property
+    def is_configured(self) -> bool:
+        """Return True when both Bank Hub `client_id` and `client_secret` are configured."""
+        return bool(self.client_id and self.client_secret)
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        current_cls = httpx.AsyncClient
+        if (
+            self._client is None
+            or getattr(self._client, "is_closed", False)
+            or self._client_cls is not current_cls
+        ):
+            old_client = self._client
+            self._client = current_cls(
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+                limits=_DEFAULT_HTTP_LIMITS,
+            )
+            self._client_cls = current_cls
+            if old_client is not None and not getattr(old_client, "is_closed", False):
+                if hasattr(old_client, "aclose"):
+                    try:
+                        await old_client.aclose()
+                    except Exception:
+                        pass
+        return self._client
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        self._client_cls = None
+        if client is not None and not getattr(client, "is_closed", False):
+            if hasattr(client, "aclose"):
+                await client.aclose()
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {
+            "X-Client-Id": self.client_id,
+            "X-Client-Secret": self.client_secret,
+            "Content-Type": "application/json",
+        }
+
+    async def create_company(
+        self,
+        *,
+        name: str,
+        code: str,
+    ) -> dict[str, Any]:
+        """Register a company in SePay Bank Hub and return its external `xid`."""
+        if not self.is_configured:
+            return {
+                "configured": False,
+                "xid": None,
+                "detail": "SePay Bank Hub credentials are not configured",
+            }
+        url = f"{self.base_url}/v1/companies"
+        payload = {"name": name.strip(), "code": code.strip().upper()}
+        try:
+            client = await self._get_client()
+            resp = await client.post(url, headers=self._auth_headers(), json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            xid = None
+            if isinstance(data, dict):
+                xid = data.get("xid") or data.get("id") or (data.get("data") or {}).get("xid")
+            return {
+                "configured": True,
+                "xid": str(xid) if xid else None,
+                "raw": data if isinstance(data, dict) else {},
+            }
+        except httpx.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "SePay Bank Hub create_company failed (error_type=%s, status_code=%s)",
+                type(exc).__name__,
+                status_code,
+            )
+            return {
+                "configured": True,
+                "xid": None,
+                "error": "SePay Bank Hub API error",
+                "status_code": status_code,
+            }
+
+    async def create_link_token(
+        self,
+        *,
+        company_xid: str,
+        bank_code: str | None = None,
+        redirect_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Request a SePay Bank Hub link token for an already-registered `company_xid`."""
+        if not self.is_configured:
+            return {
+                "configured": False,
+                "link_token": None,
+                "connect_url": None,
+                "expires_at": None,
+                "detail": "SePay Bank Hub credentials are not configured",
+            }
+        url = f"{self.base_url}/v1/link-tokens"
+        payload: dict[str, Any] = {"company_xid": company_xid}
+        if bank_code:
+            payload["bank_code"] = bank_code.strip()
+        if redirect_url:
+            payload["redirect_url"] = redirect_url.strip()
+
+        try:
+            client = await self._get_client()
+            resp = await client.post(url, headers=self._auth_headers(), json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            inner = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+            if not isinstance(inner, dict):
+                inner = {}
+            return {
+                "configured": True,
+                "link_token": inner.get("link_token") or inner.get("token"),
+                "connect_url": inner.get("connect_url") or inner.get("url"),
+                "expires_at": inner.get("expires_at"),
+                "detail": "Link token created",
+            }
+        except httpx.HTTPError as exc:
+            status_code = (
+                exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            )
+            logger.warning(
+                "SePay Bank Hub create_link_token failed (error_type=%s, status_code=%s)",
+                type(exc).__name__,
+                status_code,
+            )
+            return {
+                "configured": True,
+                "link_token": None,
+                "connect_url": None,
+                "expires_at": None,
+                "error": "SePay Bank Hub API error",
+                "status_code": status_code,
+                "detail": "Failed to create SePay Bank Hub link token",
+            }
+
+
 meta_graph_client = MetaGraphClient()
 sepay_client = SePayClient()
+sepay_bankhub_client = SePayBankHubClient()
 telegram_dispatch_client = TelegramDispatchClient()
 
 
 async def close_integration_clients() -> None:
     """Close shared pooled `httpx.AsyncClient` instances across integration singletons."""
     await meta_graph_client.aclose()
+    await sepay_client.aclose()
+    await sepay_bankhub_client.aclose()
     await telegram_dispatch_client.aclose()

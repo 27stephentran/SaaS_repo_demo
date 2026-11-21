@@ -12,6 +12,10 @@ import {
   forwardAuthorizedRequest,
   getBackendBaseUrl
 } from '~/server/utils/backendProxy'
+import {
+  parseErpWritePayload,
+  serializeErpResponse
+} from '~/server/utils/serializers'
 
 const MUTATING_METHODS = new Set(['POST', 'PATCH', 'PUT', 'DELETE'])
 const ERP_PATH_ALLOWLIST = /^[a-zA-Z0-9/_-]+$/
@@ -80,15 +84,18 @@ export default defineEventHandler(async (event) => {
   let body: string | undefined
   if (method !== 'GET' && method !== 'HEAD') {
     const rawBody = await readRawBody(event, 'utf8')
-    if (rawBody !== undefined && rawBody.length > 0) {
-      body = rawBody
-      headers['Content-Type'] = getHeader(event, 'content-type') || 'application/json'
+    body = parseErpWritePayload(cleanPath, method, rawBody)
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json'
     }
   }
 
-  return await forwardAuthorizedRequest(event, targetUrl, {
+  const upstreamData = await forwardAuthorizedRequest(event, targetUrl, {
     method,
     headers,
-    body
+    body,
+    requireLiveApi: true
   })
+
+  return serializeErpResponse(cleanPath, method, upstreamData)
 })

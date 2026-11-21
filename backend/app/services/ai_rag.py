@@ -13,7 +13,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 from typing import Any
 
@@ -21,7 +20,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_production_env
 from app.models.entities import InventoryResponse
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,6 @@ logger = logging.getLogger(__name__)
 MAX_INPUT_CHARS = 1000
 MAX_OUTPUT_TOKENS = 512
 ORDER_CONFIRMATION_CONFIDENCE_THRESHOLD = 0.8
-DEFAULT_TENANT_ALIASES = frozenset({"default-tenant", "tenant-default"})
 
 _PROMPT_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?", re.IGNORECASE),
@@ -118,9 +116,7 @@ _COMPLEX_REASONING_KEYWORDS: tuple[str, ...] = (
 
 def _is_production_env() -> bool:
     """Return True when running in production mode where deterministic vector fallback is forbidden."""
-    settings = get_settings()
-    env_val = os.getenv("APP_ENV", settings.app_env)
-    return str(env_val).strip().lower() == "production"
+    return is_production_env()
 
 
 class RAGConsultationOutput(BaseModel):
@@ -247,27 +243,24 @@ class SalesRAGEngine:
     @staticmethod
     def _filter_items_for_tenant(
         items: list[InventoryResponse],
-        tenant_id: str,
+        tenant_id: str | None,
     ) -> list[InventoryResponse]:
-        """Enforce strict per-tenant context isolation (`U-10`) before prompt construction."""
+        """Enforce strict per-tenant and active-record context isolation (`U-10`) before prompt construction."""
         clean_tenant = tenant_id.strip() if isinstance(tenant_id, str) else ""
         if not clean_tenant:
             return []
 
         isolated: list[InventoryResponse] = []
         for item in items:
+            if not getattr(item, "is_active", True):
+                continue
             raw_item_tenant = getattr(item, "tenant_id", None)
             if not isinstance(raw_item_tenant, str):
                 continue
             item_tenant = raw_item_tenant.strip()
             if not item_tenant:
                 continue
-            if (
-                clean_tenant in DEFAULT_TENANT_ALIASES
-                and item_tenant in DEFAULT_TENANT_ALIASES
-            ):
-                isolated.append(item)
-            elif item_tenant == clean_tenant:
+            if item_tenant == clean_tenant:
                 isolated.append(item)
         return isolated
 
@@ -440,14 +433,19 @@ class SalesRAGEngine:
         customer_message: str,
         matched_items: list[InventoryResponse],
         use_pro_model: bool = False,
-        tenant_id: str = "default-tenant",
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         """Generate a grounded sales consultation reply and detect confirmed purchase intent."""
+        effective_tenant = (
+            tenant_id.strip()
+            if isinstance(tenant_id, str)
+            else get_settings().default_tenant_id.strip()
+        )
         sanitized_message, injection_detected = sanitize_untrusted_input(
             customer_message,
             max_chars=self.MAX_INPUT_CHARS,
         )
-        tenant_items = self._filter_items_for_tenant(matched_items, tenant_id=tenant_id)
+        tenant_items = self._filter_items_for_tenant(matched_items, tenant_id=effective_tenant)
         model_name = self.select_model_for_query(
             customer_message=sanitized_message,
             use_pro_model=use_pro_model,
@@ -498,7 +496,7 @@ class SalesRAGEngine:
                 "set order_intent_detected=false and requires_confirmation=true."
             )
             prompt = (
-                f"Tenant Context: {tenant_id}\n"
+                f"Tenant Context: {effective_tenant}\n"
                 f"Inventory Context:\n{catalog_context or 'No matching products.'}\n\n"
                 f"Customer Message (Untrusted Input): {sanitized_message}\n\n"
                 "Provide a concise, helpful structured JSON sales response:"

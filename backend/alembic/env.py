@@ -19,6 +19,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
+if not settings.database_url.strip():
+    raise RuntimeError("DATABASE_URL environment variable must be configured for Alembic migrations")
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata

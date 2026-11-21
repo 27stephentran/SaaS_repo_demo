@@ -25,13 +25,26 @@ TEST_API_TOKEN_SECRET = "test-api-token-secret-must-be-at-least-32-chars-0123456
 TEST_META_APP_SECRET = "test-meta-app-secret-0123456789"
 TEST_SEPAY_WEBHOOK_SECRET = "sepay-sandbox-secret"
 TEST_META_VERIFY_TOKEN = "saas-meta-webhook-verify-token"
+TEST_DEFAULT_TENANT_ID = "default-tenant"
+TEST_DEMO_TENANT_ID = "demo-tenant"
+TEST_CORS_ORIGINS = '["https://saa-s-repo-demo.vercel.app","http://localhost:3000"]'
+TEST_SEPAY_ACCOUNT_NUMBER = "0123456789"
+TEST_SEPAY_BANK_CODE = "MB"
+TEST_SOFT_DELETE_RETENTION_DAYS = "365"
 
 os.environ.setdefault("API_TOKEN_SECRET", TEST_API_TOKEN_SECRET)
 os.environ.setdefault("META_APP_SECRET", TEST_META_APP_SECRET)
 os.environ.setdefault("SEPAY_WEBHOOK_SECRET", TEST_SEPAY_WEBHOOK_SECRET)
 os.environ.setdefault("META_VERIFY_TOKEN", TEST_META_VERIFY_TOKEN)
+os.environ.setdefault("DEFAULT_TENANT_ID", TEST_DEFAULT_TENANT_ID)
+os.environ.setdefault("DEMO_TENANT_ID", TEST_DEMO_TENANT_ID)
+os.environ.setdefault("CORS_ORIGINS", TEST_CORS_ORIGINS)
+os.environ.setdefault("SEPAY_ACCOUNT_NUMBER", TEST_SEPAY_ACCOUNT_NUMBER)
+os.environ.setdefault("SEPAY_BANK_CODE", TEST_SEPAY_BANK_CODE)
+os.environ.setdefault("SOFT_DELETE_RETENTION_DAYS", TEST_SOFT_DELETE_RETENTION_DAYS)
 
 from app.api.auth import auth_rate_limiter  # noqa: E402
+from app.api.demo import demo_rate_limiter  # noqa: E402
 from app.core.auth import create_access_token, hash_password, hash_token  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import (  # noqa: E402
@@ -73,17 +86,38 @@ def _use_postgres_in_tests() -> bool:
 
 async def reset_postgres_test_state() -> None:
     """Truncate tenant tables and re-seed deterministic `default-tenant` fixtures in PostgreSQL."""
+    candidate_tables = (
+        "channel_messages",
+        "channel_conversations",
+        "outbox_jobs",
+        "webhook_dedup_events",
+        "api_tokens",
+        "users",
+        "sepay_webhook_logs",
+        "orders",
+        "employees",
+        "customers",
+        "inventory",
+        "tenant_channels",
+        "companies",
+    )
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            await session.execute(
+            existing_res = await session.execute(
                 text(
-                    "TRUNCATE TABLE "
-                    "outbox_jobs, webhook_dedup_events, api_tokens, users, "
-                    "sepay_webhook_logs, orders, employees, customers, "
-                    "inventory, tenant_channels "
-                    "RESTART IDENTITY CASCADE"
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = current_schema()"
                 )
             )
+            existing_tables = {str(row[0]) for row in existing_res.fetchall()}
+            tables_to_truncate = [t for t in candidate_tables if t in existing_tables]
+            if tables_to_truncate:
+                await session.execute(
+                    text(
+                        f"TRUNCATE TABLE {', '.join(tables_to_truncate)} "
+                        "RESTART IDENTITY CASCADE"
+                    )
+                )
             await session.execute(text("ALTER SEQUENCE order_code_seq RESTART WITH 1002"))
 
     customer_id = UUID("11111111-1111-1111-1111-111111111111")
@@ -190,22 +224,33 @@ async def reset_postgres_test_state() -> None:
 @pytest.fixture(autouse=True)
 def isolate_test_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Reset in-memory repository/rate-limit/idempotency state and deterministic test secrets per test."""
-    erp_repository.reset()
-    auth_rate_limiter.reset()
-    sepay_client._processed_transactions.clear()
-
     monkeypatch.setenv("API_TOKEN_SECRET", TEST_API_TOKEN_SECRET)
     monkeypatch.setenv("META_APP_SECRET", TEST_META_APP_SECRET)
     monkeypatch.setenv("SEPAY_WEBHOOK_SECRET", TEST_SEPAY_WEBHOOK_SECRET)
     monkeypatch.setenv("META_VERIFY_TOKEN", TEST_META_VERIFY_TOKEN)
+    monkeypatch.setenv("DEFAULT_TENANT_ID", TEST_DEFAULT_TENANT_ID)
+    monkeypatch.setenv("DEMO_TENANT_ID", TEST_DEMO_TENANT_ID)
+    monkeypatch.setenv("CORS_ORIGINS", TEST_CORS_ORIGINS)
+    monkeypatch.setenv("SEPAY_ACCOUNT_NUMBER", TEST_SEPAY_ACCOUNT_NUMBER)
+    monkeypatch.setenv("SEPAY_BANK_CODE", TEST_SEPAY_BANK_CODE)
+    monkeypatch.setenv("SOFT_DELETE_RETENTION_DAYS", TEST_SOFT_DELETE_RETENTION_DAYS)
+    get_settings.cache_clear()
+
+    erp_repository.reset()
+    auth_rate_limiter.reset()
+    demo_rate_limiter.reset()
+    sepay_client._processed_transactions.clear()
+
     monkeypatch.setattr(meta_graph_client, "app_secret", TEST_META_APP_SECRET)
     monkeypatch.setattr(sepay_client, "webhook_secret", TEST_SEPAY_WEBHOOK_SECRET)
-    get_settings.cache_clear()
+    monkeypatch.setattr(sepay_client, "account_number", TEST_SEPAY_ACCOUNT_NUMBER)
+    monkeypatch.setattr(sepay_client, "bank_code", TEST_SEPAY_BANK_CODE)
 
     yield
 
     erp_repository.reset()
     auth_rate_limiter.reset()
+    demo_rate_limiter.reset()
     sepay_client._processed_transactions.clear()
     get_settings.cache_clear()
 

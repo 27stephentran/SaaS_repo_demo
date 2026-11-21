@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from app.core.auth import create_access_token, create_refresh_token, decode_and_verify_token
 from app.core.config import Settings, get_settings
-from app.core.database import DEFAULT_LOCAL_DATABASE_URL, erp_repository
+from app.core.database import erp_repository
 from app.main import app
 from app.models.entities import EmployeeResponse, OrderStatus
 from app.services.integrations import (
@@ -88,7 +88,7 @@ async def test_is_postgres_active_fails_closed_in_production(
 ) -> None:
     """`is_postgres_active()` raises RuntimeError in production when DB is default or unreachable."""
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("DATABASE_URL", DEFAULT_LOCAL_DATABASE_URL)
+    monkeypatch.setenv("DATABASE_URL", "")
 
     with pytest.raises(RuntimeError, match="PostgreSQL DATABASE_URL"):
         await erp_repository.is_postgres_active()

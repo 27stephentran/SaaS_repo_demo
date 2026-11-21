@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 from typing import Any
 from uuid import UUID
 
@@ -16,17 +15,19 @@ from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
 from sqlalchemy import text
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_production_env
 from app.core.database import erp_repository, tenant_db_session
 from app.models.entities import (
     CustomerResponse,
     EmployeeResponse,
+    MetaWebhookResponse,
     OrderCreateRequest,
     OrderLineItemRequest,
     OrderResponse,
     OrderStatus,
     SePayGatewayIPNPayload,
     SePayIPNWebhookPayload,
+    SePayWebhookResponse,
 )
 from app.services.ai_rag import sales_rag_engine
 from app.services.integrations import (
@@ -43,31 +44,34 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["Webhooks"])
 
 def _is_production_env() -> bool:
     """Return True when running in production mode where unregistered channels fail closed."""
-    settings = get_settings()
-    env_val = os.getenv("APP_ENV", settings.app_env)
-    return str(env_val).strip().lower() == "production"
+    return is_production_env()
 
 
 async def _get_or_create_meta_customer(
     sender_psid: str,
     tenant_id: str,
+    company_id: UUID | None = None,
 ) -> CustomerResponse:
-    """Look up or create a tenant-scoped Meta PSID customer in PostgreSQL or local fallback."""
+    """Look up or create a tenant/company-scoped Meta PSID customer in PostgreSQL or local fallback."""
     if await erp_repository.is_postgres_active():
-        async with tenant_db_session(tenant_id) as session:
+        async with tenant_db_session(tenant_id, company_id=company_id) as session:
             stmt = text(
                 """
-                INSERT INTO customers (tenant_id, meta_psid, full_name)
-                VALUES (:tenant_id, :meta_psid, :full_name)
+                INSERT INTO customers (tenant_id, company_id, meta_psid, full_name)
+                VALUES (:tenant_id, :company_id, :meta_psid, :full_name)
                 ON CONFLICT (tenant_id, meta_psid) DO UPDATE
-                    SET full_name = customers.full_name
-                RETURNING id, tenant_id, meta_psid, full_name, phone, created_at
+                    SET full_name = customers.full_name,
+                        company_id = COALESCE(customers.company_id, EXCLUDED.company_id),
+                        is_active = TRUE,
+                        deactivated_at = NULL
+                RETURNING id, tenant_id, company_id, meta_psid, full_name, phone, is_active, deactivated_at, created_at
                 """
             )
             result = await session.execute(
                 stmt,
                 {
                     "tenant_id": tenant_id,
+                    "company_id": company_id,
                     "meta_psid": sender_psid,
                     "full_name": "Meta Shopper",
                 },
@@ -78,18 +82,25 @@ async def _get_or_create_meta_customer(
     return erp_repository.get_or_create_customer_by_psid(
         meta_psid=sender_psid,
         tenant_id=tenant_id,
+        company_id=company_id,
     )
 
 
-async def _fetch_order_by_code(order_code: str, tenant_id: str) -> OrderResponse | None:
-    """Fetch a tenant-scoped order by order_code from PostgreSQL or local fallback."""
+async def _fetch_order_by_code(
+    order_code: str,
+    tenant_id: str,
+    company_id: UUID | None = None,
+) -> OrderResponse | None:
+    """Fetch a tenant-scoped (and optionally company-scoped) order by order_code."""
     if await erp_repository.is_postgres_active():
-        async with tenant_db_session(tenant_id) as session:
+        async with tenant_db_session(tenant_id, company_id=company_id) as session:
             stmt = text(
                 """
                 SELECT
                     o.id,
                     o.tenant_id,
+                    o.company_id,
+                    COALESCE(comp.name, '') AS company_name,
                     o.order_code,
                     o.customer_id,
                     COALESCE(c.full_name, 'Enterprise Customer') AS customer_name,
@@ -99,12 +110,17 @@ async def _fetch_order_by_code(order_code: str, tenant_id: str) -> OrderResponse
                     o.sepay_qr_url,
                     o.sepay_transaction_id,
                     o.items_json,
+                    o.is_active,
+                    o.deactivated_at,
                     o.created_at,
                     o.updated_at
                 FROM orders o
                 LEFT JOIN customers c ON c.id = o.customer_id AND c.tenant_id = o.tenant_id
+                LEFT JOIN companies comp ON comp.id = o.company_id AND comp.tenant_id = o.tenant_id
                 WHERE UPPER(o.order_code) = :order_code
                   AND o.tenant_id = :tenant_id
+                  AND (CAST(:company_id AS uuid) IS NULL OR o.company_id = CAST(:company_id AS uuid))
+                  AND o.is_active = TRUE
                 LIMIT 1
                 """
             )
@@ -113,12 +129,17 @@ async def _fetch_order_by_code(order_code: str, tenant_id: str) -> OrderResponse
                 {
                     "order_code": order_code.upper().strip(),
                     "tenant_id": tenant_id,
+                    "company_id": company_id,
                 },
             )
             row = result.mappings().first()
             return OrderResponse.model_validate(dict(row)) if row else None
 
-    return erp_repository.get_order_by_code(order_code=order_code, tenant_id=tenant_id)
+    return erp_repository.get_order_by_code(
+        order_code=order_code,
+        tenant_id=tenant_id,
+        company_id=company_id,
+    )
 
 
 async def _fetch_sepay_webhook_log(
@@ -130,7 +151,7 @@ async def _fetch_sepay_webhook_log(
         async with tenant_db_session(tenant_id) as session:
             stmt = text(
                 """
-                SELECT sepay_transaction_id, tenant_id, order_code, processing_status
+                SELECT sepay_transaction_id, tenant_id, company_id, order_code, processing_status
                 FROM sepay_webhook_logs
                 WHERE sepay_transaction_id = :tx_id
                 LIMIT 1
@@ -156,6 +177,7 @@ async def _persist_sepay_event_fields(
     raw_payload_dict: dict[str, Any],
     processing_status: str,
     mark_paid: bool = False,
+    company_id: UUID | None = None,
 ) -> tuple[bool, OrderResponse | None]:
     """Atomically persist SePay webhook log and optional PAID transition in DB or local fallback."""
     if await erp_repository.is_postgres_active():
@@ -171,12 +193,17 @@ async def _persist_sepay_event_fields(
             raw_payload=raw_payload_dict,
             mark_paid=mark_paid,
             tenant_id=tenant_id,
+            company_id=company_id,
         )
         sepay_client.mark_transaction_processed(transaction_id)
         if not inserted:
             return False, None
         updated_order = (
-            await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+            await _fetch_order_by_code(
+                order_code=order_code,
+                tenant_id=tenant_id,
+                company_id=company_id,
+            )
             if mark_paid and order_code
             else None
         )
@@ -193,6 +220,7 @@ async def _persist_sepay_event_fields(
         account_number=account_number,
         sub_account=sub_account,
         reference_code=reference_code,
+        company_id=company_id,
     )
     sepay_client.mark_transaction_processed(transaction_id)
     if not inserted:
@@ -204,6 +232,7 @@ async def _persist_sepay_event_fields(
             order_code=order_code,
             transaction_id=transaction_id,
             tenant_id=tenant_id,
+            company_id=company_id,
         )
     return True, updated_order
 
@@ -217,6 +246,7 @@ async def _persist_sepay_event(
     raw_payload_dict: dict[str, Any],
     processing_status: str,
     mark_paid: bool = False,
+    company_id: UUID | None = None,
 ) -> tuple[bool, OrderResponse | None]:
     """Persist a SePay bank-transfer webhook payload via `_persist_sepay_event_fields`."""
     return await _persist_sepay_event_fields(
@@ -231,15 +261,20 @@ async def _persist_sepay_event(
         raw_payload_dict=raw_payload_dict,
         processing_status=processing_status,
         mark_paid=mark_paid,
+        company_id=company_id,
     )
 
 
 async def _select_target_employees(
     assigned_employee_id: UUID | None,
     tenant_id: str,
+    company_id: UUID | None = None,
 ) -> list[EmployeeResponse]:
-    """Select active tenant fulfillment employee(s) for Telegram dispatch."""
-    employees = await order_service.list_employees(tenant_id=tenant_id)
+    """Select active tenant/company fulfillment employee(s) for Telegram dispatch."""
+    employees = await order_service.list_employees(
+        tenant_id=tenant_id,
+        company_id=company_id,
+    )
     active_employees = [emp for emp in employees if emp.is_active]
     if not active_employees:
         return []
@@ -304,11 +339,13 @@ async def _enqueue_and_dispatch_telegram_alerts(
     background_tasks: BackgroundTasks,
     updated_order: OrderResponse,
     tenant_id: str,
+    company_id: UUID | None = None,
 ) -> dict[str, Any] | None:
-    """Enqueue `telegram_dispatch` outbox jobs for active tenant staff and schedule execution."""
+    """Enqueue `telegram_dispatch` outbox jobs for active tenant/company staff and schedule execution."""
     target_employees = await _select_target_employees(
         assigned_employee_id=updated_order.assigned_employee_id,
         tenant_id=tenant_id,
+        company_id=company_id or updated_order.company_id,
     )
     if not target_employees:
         return None
@@ -317,10 +354,7 @@ async def _enqueue_and_dispatch_telegram_alerts(
         f"{item.get('quantity', 1)}x {item.get('sku', 'ITEM')}"
         for item in updated_order.items_json
     )
-    has_live_bot = bool(
-        telegram_dispatch_client.bot_token
-        and not telegram_dispatch_client.bot_token.startswith("123456789:")
-    )
+    has_live_bot = bool(telegram_dispatch_client.bot_token.strip())
     outbox_job_ids: list[str] = []
     dispatches: list[tuple[UUID, str]] = []
     for employee in target_employees:
@@ -420,25 +454,32 @@ async def _handle_sepay_gateway_ipn(
         or sepay_client.pg_merchant_id
         or ""
     )
-    resolved_tenant: str | None = None
+    resolved_ctx: tuple[str, UUID | None] | None = None
     for ext_id in (
         str(merchant_candidate).strip(),
         (sepay_client.account_number or "").strip(),
     ):
         if ext_id:
-            resolved_tenant = await erp_repository.resolve_channel_tenant("sepay_account", ext_id)
-            if resolved_tenant is not None:
+            resolved_ctx = await erp_repository.resolve_channel_context("sepay_account", ext_id)
+            if resolved_ctx is not None:
                 break
 
-    if resolved_tenant is None:
+    if resolved_ctx is None:
         if is_prod:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Unregistered SePay Payment Gateway channel",
             )
-        tenant_id = settings.default_tenant_id
+        fallback_tenant = settings.default_tenant_id.strip()
+        if not fallback_tenant:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unregistered SePay Payment Gateway channel and DEFAULT_TENANT_ID is unset",
+            )
+        tenant_id = fallback_tenant
+        company_id: UUID | None = None
     else:
-        tenant_id = resolved_tenant
+        tenant_id, company_id = resolved_ctx
 
     raw_tx_id = (
         (tx_info.transaction_id if tx_info and tx_info.transaction_id else None)
@@ -483,7 +524,11 @@ async def _handle_sepay_gateway_ipn(
         not pg_active and sepay_client.is_transaction_processed(transaction_id)
     ):
         existing_order = (
-            await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+            await _fetch_order_by_code(
+                order_code=order_code,
+                tenant_id=tenant_id,
+                company_id=company_id,
+            )
             if order_code
             else None
         )
@@ -495,6 +540,7 @@ async def _handle_sepay_gateway_ipn(
                     existing_order.assigned_employee_id if existing_order else None
                 ),
                 tenant_id=tenant_id,
+                company_id=company_id,
             )
             primary_emp = target_employees[0] if target_employees else None
             telegram_dispatch = {
@@ -532,6 +578,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status=proc_status,
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -558,6 +605,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_UNCAPTURED",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -587,6 +635,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_CURRENCY",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -611,6 +660,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_NO_ORDER_CODE",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -621,7 +671,11 @@ async def _handle_sepay_gateway_ipn(
             "sepay_transaction_id": transaction_id,
         }
 
-    existing_order = await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+    existing_order = await _fetch_order_by_code(
+        order_code=order_code,
+        tenant_id=tenant_id,
+        company_id=company_id,
+    )
     if existing_order is None:
         inserted, _ = await _persist_sepay_event_fields(
             transaction_id=transaction_id,
@@ -635,6 +689,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="UNMATCHED_ORDER",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -662,6 +717,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status=proc_status,
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -687,6 +743,7 @@ async def _handle_sepay_gateway_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="UNDERPAID",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -713,6 +770,7 @@ async def _handle_sepay_gateway_ipn(
         raw_payload_dict=raw_payload_dict,
         processing_status="PROCESSED",
         mark_paid=True,
+        company_id=company_id,
     )
     if not inserted:
         return {
@@ -740,6 +798,7 @@ async def _handle_sepay_gateway_ipn(
         background_tasks=background_tasks,
         updated_order=updated_order,
         tenant_id=tenant_id,
+        company_id=company_id,
     )
     return {
         "success": True,
@@ -747,7 +806,7 @@ async def _handle_sepay_gateway_ipn(
         "notification_type": notification_type,
         "order_code": updated_order.order_code,
         "order_status": updated_order.status.value,
-        "sepay_transaction_id": updated_order.sepay_transaction_id,
+        "sepay_transaction_id": updated_order.sepay_transaction_id or transaction_id,
         "telegram_dispatch": telegram_dispatch_result,
     }
 
@@ -772,7 +831,7 @@ async def verify_meta_webhook(
     )
 
 
-@router.post("/meta")
+@router.post("/meta", response_model=MetaWebhookResponse)
 async def handle_meta_webhook(
     request: Request,
     x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
@@ -805,6 +864,8 @@ async def handle_meta_webhook(
     settings = get_settings()
     is_prod = _is_production_env()
     payload_hash = hashlib.sha256(raw_body).hexdigest()
+    meta_object = str(payload.get("object") or "").strip().lower()
+    chat_channel = "instagram" if meta_object == "instagram" else "messenger"
     entries = payload.get("entry", [])
     if not isinstance(entries, list):
         entries = []
@@ -815,12 +876,12 @@ async def handle_meta_webhook(
             continue
 
         page_id = str(entry.get("id") or "").strip()
-        resolved_tenant = (
-            await erp_repository.resolve_channel_tenant("meta_page", page_id)
+        resolved_ctx = (
+            await erp_repository.resolve_channel_context("meta_page", page_id)
             if page_id
             else None
         )
-        if resolved_tenant is None:
+        if resolved_ctx is None:
             if is_prod:
                 processed_events.append(
                     {
@@ -830,9 +891,20 @@ async def handle_meta_webhook(
                     }
                 )
                 continue
-            tenant_id = settings.default_tenant_id
+            fallback_tenant = settings.default_tenant_id.strip()
+            if not fallback_tenant:
+                processed_events.append(
+                    {
+                        "type": "entry",
+                        "page_id": page_id,
+                        "status": "skipped_unregistered_channel",
+                    }
+                )
+                continue
+            tenant_id = fallback_tenant
+            company_id: UUID | None = None
         else:
-            tenant_id = resolved_tenant
+            tenant_id, company_id = resolved_ctx
 
         # 1. Handle direct Messenger / Instagram messages
         for messaging_event in entry.get("messaging", []):
@@ -869,13 +941,38 @@ async def handle_meta_webhook(
             customer = await _get_or_create_meta_customer(
                 sender_psid=sender_psid,
                 tenant_id=tenant_id,
+                company_id=company_id,
             )
+            conversation = await erp_repository.upsert_channel_conversation(
+                tenant_id=tenant_id,
+                company_id=company_id,
+                customer_id=customer.id,
+                channel=chat_channel,
+                external_thread_id=sender_psid,
+                customer_name=customer.full_name,
+                last_message_preview=message_text,
+                increment_unread=0,
+            )
+            await erp_repository.append_channel_message(
+                tenant_id=tenant_id,
+                company_id=company_id,
+                conversation_id=conversation.id,
+                channel=chat_channel,
+                direction="inbound",
+                sender_type="customer",
+                sender_name=customer.full_name,
+                content=message_text,
+                external_message_id=external_event_id,
+                increment_unread=1,
+            )
+
             query_embedding = await sales_rag_engine.embed_text(message_text)
             matched_items = await order_service.search_inventory(
                 query_embedding=query_embedding,
                 query_text=message_text,
                 tenant_id=tenant_id,
                 limit=3,
+                company_id=company_id,
             )
             rag_result = await sales_rag_engine.generate_sales_reply(
                 customer_message=message_text,
@@ -897,6 +994,7 @@ async def handle_meta_webhook(
                     created_order = await order_service.create_order(
                         payload=OrderCreateRequest(
                             tenant_id=tenant_id,
+                            company_id=company_id,
                             customer_id=customer.id,
                             items=[
                                 OrderLineItemRequest(
@@ -906,6 +1004,7 @@ async def handle_meta_webhook(
                             ],
                         ),
                         tenant_id=tenant_id,
+                        company_id=company_id,
                     )
                     created_order_code = created_order.order_code
                     sepay_qr_url = created_order.sepay_qr_url
@@ -924,6 +1023,18 @@ async def handle_meta_webhook(
                             "\n\n⚠️ Hiện sản phẩm đang tạm hết hàng, shop sẽ kiểm tra và phản hồi anh/chị sớm nhất ạ."
                         )
 
+            await erp_repository.append_channel_message(
+                tenant_id=tenant_id,
+                company_id=company_id,
+                conversation_id=conversation.id,
+                channel=chat_channel,
+                direction="outbound",
+                sender_type="ai_bot",
+                sender_name="AI Sales Assistant",
+                content=rag_result["reply_text"],
+                order_code=created_order_code,
+            )
+
             outbox_job_id = await erp_repository.enqueue_outbox_job(
                 job_type="meta_send_message",
                 payload={
@@ -931,6 +1042,7 @@ async def handle_meta_webhook(
                     "text": rag_result["reply_text"],
                     "order_code": created_order_code,
                     "mid": external_event_id,
+                    "company_id": str(company_id) if company_id else None,
                 },
                 tenant_id=tenant_id,
             )
@@ -1030,23 +1142,63 @@ async def handle_meta_webhook(
                     )
                     continue
 
+                commenter = value.get("from") if isinstance(value.get("from"), dict) else {}
+                commenter_id = str(commenter.get("id") or comment_id).strip()
+                commenter_name = str(commenter.get("name") or "Commenter").strip()
+
                 query_embedding = await sales_rag_engine.embed_text(comment_text)
                 matched_items = await order_service.search_inventory(
                     query_embedding=query_embedding,
                     query_text=comment_text,
                     tenant_id=tenant_id,
                     limit=2,
+                    company_id=company_id,
                 )
                 rag_result = await sales_rag_engine.generate_sales_reply(
                     customer_message=comment_text,
                     matched_items=matched_items,
                     tenant_id=tenant_id,
                 )
+
+                conv = await erp_repository.upsert_channel_conversation(
+                    tenant_id=tenant_id,
+                    company_id=company_id,
+                    customer_id=None,
+                    channel=chat_channel,
+                    external_thread_id=commenter_id,
+                    customer_name=commenter_name,
+                    last_message_preview=comment_text,
+                    increment_unread=0,
+                )
+                await erp_repository.append_channel_message(
+                    tenant_id=tenant_id,
+                    company_id=company_id,
+                    conversation_id=conv.id,
+                    channel=chat_channel,
+                    direction="inbound",
+                    sender_type="customer",
+                    sender_name=commenter_name,
+                    content=comment_text,
+                    external_message_id=comment_id,
+                    increment_unread=1,
+                )
+                await erp_repository.append_channel_message(
+                    tenant_id=tenant_id,
+                    company_id=company_id,
+                    conversation_id=conv.id,
+                    channel=chat_channel,
+                    direction="outbound",
+                    sender_type="ai_bot",
+                    sender_name="AI Sales Assistant",
+                    content=rag_result["reply_text"],
+                )
+
                 outbox_job_id = await erp_repository.enqueue_outbox_job(
                     job_type="meta_private_reply",
                     payload={
                         "comment_id": comment_id,
                         "text": rag_result["reply_text"],
+                        "company_id": str(company_id) if company_id else None,
                     },
                     tenant_id=tenant_id,
                 )
@@ -1122,7 +1274,7 @@ async def handle_meta_webhook(
     }
 
 
-@router.post("/sepay")
+@router.post("/sepay", response_model=SePayWebhookResponse)
 async def handle_sepay_ipn(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1161,26 +1313,40 @@ async def handle_sepay_ipn(
 
     settings = get_settings()
     is_prod = _is_production_env()
-    resolved_tenant = await erp_repository.resolve_channel_tenant(
+    resolved_ctx = await erp_repository.resolve_channel_context(
         "sepay_account",
         payload.accountNumber or "",
         payload.subAccount or "",
     )
-    if resolved_tenant is None:
+    if resolved_ctx is None:
         if is_prod:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Unregistered SePay bank account channel",
             )
-        tenant_id = settings.default_tenant_id
+        fallback_tenant = settings.default_tenant_id.strip()
+        if not fallback_tenant:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unregistered SePay bank account channel and DEFAULT_TENANT_ID is unset",
+            )
+        tenant_id = fallback_tenant
+        company_id: UUID | None = None
     else:
-        tenant_id = resolved_tenant
+        tenant_id, company_id = resolved_ctx
+
+    company_memo_prefix: str | None = None
+    if company_id is not None:
+        comp = await erp_repository.get_company(company_id=company_id, tenant_id=tenant_id)
+        if comp is not None and comp.sepay_memo_prefix:
+            company_memo_prefix = comp.sepay_memo_prefix
 
     raw_payload_dict = json.loads(raw_body.decode("utf-8"))
     transaction_id = str(payload.id)
     order_code = sepay_client.extract_order_code(
         content=payload.content,
         explicit_code=payload.code,
+        memo_prefix=company_memo_prefix,
     )
 
     pg_active = await erp_repository.is_postgres_active()
@@ -1189,7 +1355,11 @@ async def handle_sepay_ipn(
         not pg_active and sepay_client.is_transaction_processed(transaction_id)
     ):
         existing_order = (
-            await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+            await _fetch_order_by_code(
+                order_code=order_code,
+                tenant_id=tenant_id,
+                company_id=company_id,
+            )
             if order_code
             else None
         )
@@ -1201,6 +1371,7 @@ async def handle_sepay_ipn(
                     existing_order.assigned_employee_id if existing_order else None
                 ),
                 tenant_id=tenant_id,
+                company_id=company_id,
             )
             primary_emp = target_employees[0] if target_employees else None
             telegram_dispatch = {
@@ -1232,6 +1403,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_OUTBOUND",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1241,7 +1413,9 @@ async def handle_sepay_ipn(
             "sepay_transaction_id": transaction_id,
         }
 
-    if not sepay_client.matches_configured_account(payload.accountNumber, payload.subAccount):
+    if company_id is None and not sepay_client.matches_configured_account(
+        payload.accountNumber, payload.subAccount
+    ):
         inserted, _ = await _persist_sepay_event(
             transaction_id=transaction_id,
             tenant_id=tenant_id,
@@ -1250,6 +1424,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_ACCOUNT_MISMATCH",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1268,6 +1443,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="IGNORED_NO_ORDER_CODE",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1277,7 +1453,11 @@ async def handle_sepay_ipn(
             "sepay_transaction_id": transaction_id,
         }
 
-    existing_order = await _fetch_order_by_code(order_code=order_code, tenant_id=tenant_id)
+    existing_order = await _fetch_order_by_code(
+        order_code=order_code,
+        tenant_id=tenant_id,
+        company_id=company_id,
+    )
     if existing_order is None:
         inserted, _ = await _persist_sepay_event(
             transaction_id=transaction_id,
@@ -1287,6 +1467,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="UNMATCHED_ORDER",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1309,6 +1490,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status=proc_status,
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1329,6 +1511,7 @@ async def handle_sepay_ipn(
             raw_payload_dict=raw_payload_dict,
             processing_status="UNDERPAID",
             mark_paid=False,
+            company_id=company_id,
         )
         return {
             "success": True,
@@ -1350,6 +1533,7 @@ async def handle_sepay_ipn(
         raw_payload_dict=raw_payload_dict,
         processing_status="PROCESSED",
         mark_paid=True,
+        company_id=company_id,
     )
     if not inserted:
         return {
@@ -1375,6 +1559,7 @@ async def handle_sepay_ipn(
         background_tasks=background_tasks,
         updated_order=updated_order,
         tenant_id=tenant_id,
+        company_id=company_id,
     )
 
     return {
@@ -1382,6 +1567,6 @@ async def handle_sepay_ipn(
         "idempotent_duplicate": False,
         "order_code": updated_order.order_code,
         "order_status": updated_order.status.value,
-        "sepay_transaction_id": updated_order.sepay_transaction_id,
+        "sepay_transaction_id": updated_order.sepay_transaction_id or transaction_id,
         "telegram_dispatch": telegram_dispatch_result,
     }
